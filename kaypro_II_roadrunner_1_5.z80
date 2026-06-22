@@ -121,9 +121,9 @@ DriveToSelect:                  equ 0fe16h     ; logical drive number last selec
 
 densityFormatFlags:             equ 0fe18h     ; current density/format flags for selected drive (bit0=quad density)
 
-QuadDensityBit                  0
+QuadDensityBit                  equ 0
 
-QuadDensityMask                 1 shl QuadDensityBit
+QuadDensityMask                 equ 1 shl QuadDensityBit
 
 IsDoubleSided:                  equ 0fe19h     ; flag: nonzero if the currently selected drive is double-sided
 driveAFormatParams:             equ 0fe1ah     ; saved per-drive format params, drive A: (3 bytes; 0xff = unprobed)
