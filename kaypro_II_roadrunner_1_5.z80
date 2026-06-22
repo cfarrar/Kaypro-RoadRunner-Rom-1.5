@@ -92,25 +92,25 @@ SavedKeyClickEnable:            equ 0fa0eh     ; saved copy of KeyClickEnable
 DiskNumber:                     equ 0fc00h     ; (byte) currently selected logical drive (0=A:, 1=B:, ...)
 TrackNumber:                    equ 0fc01h     ; (word) requested track number
 SectorNumber:                   equ 0fc03h     ; (byte) requested CP/M (128-byte) sector number
-variable_a:                     equ 0fc09h     ; flag: set once the head has been homed/recalibrated this session
+headHomed:                      equ 0fc09h     ; flag: set once the head has been homed/recalibrated this session
 CurrentTrack:                   equ 0fc0ah     ; despite the name, this is really a "dirty" flag: nonzero means
                                                ; the 1K sector buffer at 0fc16h holds a write that hasn't been
                                                ; flushed to disk yet (see ReadSector/WriteSector's shared tail
                                                ; at WS05, and HomeHead, which forces a real FDC Restore only
                                                ; when this is set)
-variable_b:                     equ 0fc0bh     ; pending physical-sector-skip count used by the sector cache logic
-disk_var_d:                     equ 0fc0ch     ; last disk number seen by the per-1K-sector cache (see WS02)
-disk_var_a:                     equ 0fc11h     ; flag: nonzero => last access missed the sector cache, needs real I/O
+physicalSectorSkip:             equ 0fc0bh     ; pending physical-sector-skip count used by the sector cache logic
+lastSeenDiskNumber:             equ 0fc0ch     ; last disk number seen by the per-1K-sector cache (see WS02)
+lastAccessMissedSectorCache:    equ 0fc11h     ; flag: nonzero => last access missed the sector cache, needs real I/O
 writeIfZero:                    equ 0fc12h     ; 0 = this is a write call, nonzero = this is a read call
 readWriteType:                  equ 0fc13h     ; write mode passed in C to WriteSector (0/1/2, see WriteSector)
 DmaAddress:                     equ 0fc14h     ; (word) current DMA (memory transfer) address for read/write
-somevar_01                      equ 0fc04h     ; last disk number seen by the track cache (see WS07)
-somevar_02                      equ 0fc05h     ; (word) last track number seen by the track cache
-somevar_03                      equ 0fc07h     ; last (sector>>2) value seen by the track cache
-somevar_04                      equ 0fc10h     ; FDC result/status byte returned from the low-level read/write
-somevar_05                      equ 0fc0dh     ; (word) working track number for the current 1K-sector op
-somevar_06                      equ 0fc0fh     ; working CP/M-sector-within-1K-block index (0-3)
-somevar_07                      equ 0fc08h     ; SectorNumber >> 2 (1K-sector-block index within the track)
+lastCachedDisk:                 equ 0fc04h     ; last disk number seen by the track cache (see WS07)
+lastCachedTrack:                equ 0fc05h     ; (word) last track number seen by the track cache
+lastCachedSector:               equ 0fc07h     ; last (sector>>2) value seen by the track cache
+ftcResultStatus:                equ 0fc10h     ; FDC result/status byte returned from the low-level read/write
+workingTrack:                   equ 0fc0dh     ; (word) working track number for the current 1K-sector op
+workingDeblockSector:           equ 0fc0fh     ; working CP/M-sector-within-1K-block index (0-3)
+workingSecto:                   equ 0fc08h     ; SectorNumber >> 2 (1K-sector-block index within the track)
 
 ;
 ; Per-drive disk parameter block cache and floppy format state.
@@ -119,17 +119,17 @@ somevar_07                      equ 0fc08h     ; SectorNumber >> 2 (1K-sector-bl
 
 DriveToSelect:                  equ 0fe16h     ; logical drive number last selected (0xff = none yet)
 
-variable_c:                     equ 0fe18h     ; current density/format flags for selected drive (bit0=quad density)
+densityFormatFlags:             equ 0fe18h     ; current density/format flags for selected drive (bit0=quad density)
 
 QuadDensityBit                  0
 
 QuadDensityMask                 1 shl QuadDensityBit
 
 IsDoubleSided:                  equ 0fe19h     ; flag: nonzero if the currently selected drive is double-sided
-variable_e:                     equ 0fe1ah     ; saved per-drive format params, drive A: (3 bytes; 0xff = unprobed)
-variable_f:                     equ 0fe1dh     ; saved per-drive format params, drive B: (3 bytes; 0xff = unprobed)
-variable_g:                     equ 0fe20h     ; saved per-drive format params, drive C: (3 bytes; 0xff = unprobed)
-variable_h:                     equ 0fe23h     ; saved per-drive format params, drive D: (3 bytes; 0xff = unprobed)
+driveAFormatParams:             equ 0fe1ah     ; saved per-drive format params, drive A: (3 bytes; 0xff = unprobed)
+driveBFormatParams:             equ 0fe1dh     ; saved per-drive format params, drive B: (3 bytes; 0xff = unprobed)
+driveCFormatParams:             equ 0fe20h     ; saved per-drive format params, drive C: (3 bytes; 0xff = unprobed)
+driveDFormatParams:             equ 0fe23h     ; saved per-drive format params, drive D: (3 bytes; 0xff = unprobed)
 DisplayUnknown:                 equ 0fe26h     ; target column operand for cursor-positioning escape (ESC = row col)
 DisplayCursorPosition:          equ 0fe27h     ; (word) pointer into DisplayBuffer for the current cursor position
 DisplayAlphabetSelect:          equ 0fe29h     ; AND-mask applied to high-bit chars: 07fh=ASCII, 01fh=Greek
@@ -627,16 +627,16 @@ DiskInit:
         ld      bc,053h                ; 83 bytes - see note above DataBlock1InRom_start
         ldir
         xor     a
-        ld      (variable_a),a         ; clear "head homed" flag
-        ld      (variable_b),a         ; clear sector-cache skip counter
+        ld      (headHomed),a         ; clear "head homed" flag
+        ld      (physicalSectorSkip),a         ; clear sector-cache skip counter
         ld      a,000h
-        ld      (variable_c),a         ; clear density/format flags
+        ld      (densityFormatFlags),a         ; clear density/format flags
         ld      a,0ffh
         ld      (DriveToSelect),a      ; no drive selected yet
-        ld      (variable_e),a         ; mark drive A: format as "unprobed"
-        ld      (variable_f),a         ; mark drive B: format as "unprobed"
-        ld      (variable_g),a         ; mark drive C: format as "unprobed"
-DI01:   ld      (variable_h),a         ; mark drive D: format as "unprobed"
+        ld      (driveAFormatParams),a         ; mark drive A: format as "unprobed"
+        ld      (driveBFormatParams),a         ; mark drive B: format as "unprobed"
+        ld      (driveCFormatParams),a         ; mark drive C: format as "unprobed"
+DI01:   ld      (driveDFormatParams),a         ; mark drive D: format as "unprobed"
         ret
 
 
@@ -685,7 +685,7 @@ SetTrack:
 ; Always issues a Restore command to the FDC (falls through to RestoreDriveToTrack0
 ; either way - HH01 is just the next instruction after the branch).
 ; The only effect of checking CurrentTrack (the cache-dirty flag) here
-; is: if the 1K sector cache is *not* dirty, variable_a ("head homed
+; is: if the 1K sector cache is *not* dirty, headHomed ("head homed
 ; since DiskInit" flag) is explicitly cleared first, which appears to
 ; just be defensive/redundant given RestoreDriveToTrack0's own behaviour - it does
 ; not skip the Restore.
@@ -695,7 +695,7 @@ HomeHead:
         ld      a,(CurrentTrack)
         or      a
         jp      nz,HH01
-        ld      (variable_a),a          ; cache wasn't dirty - also clear the "head homed" flag
+        ld      (headHomed),a          ; cache wasn't dirty - also clear the "head homed" flag
 HH01: jp      RestoreDriveToTrack0                  ; always: issue an actual FDC Restore (seek to track 0)
 
 ;
@@ -709,10 +709,10 @@ HH01: jp      RestoreDriveToTrack0                  ; always: issue an actual FD
 ReadSector:
         call    CheckKeyboardAndBuffer  ; service the keyboard while we have a moment (avoid dropped keys)
         xor     a
-        ld      (variable_b),a          ; clear the write-streak prediction counter (this is a read, not a write)
+        ld      (physicalSectorSkip),a          ; clear the write-streak prediction counter (this is a read, not a write)
         ld      a,001h
         ld      (writeIfZero),a         ; nonzero = this is a read
-        ld      (disk_var_a),a          ; force "cache miss" - always actually read for a plain ReadSector call
+        ld      (lastAccessMissedSectorCache),a          ; force "cache miss" - always actually read for a plain ReadSector call
         ld      a,002h
         ld      (readWriteType),a
         jp      WS05
@@ -729,7 +729,7 @@ ReadSector:
 ;       right after this call, which is exactly the assumption this
 ;       routine uses to set up the "write streak" prediction below.
 ;
-; On a mode-2 write, this primes a streak counter (variable_b) with how
+; On a mode-2 write, this primes a streak counter (physicalSectorSkip) with how
 ; many more sectors (8/16/32, depending on density/sides) are expected
 ; to be written consecutively to the same 1K physical sector group, so
 ; later WriteSector calls in that streak can skip re-validating the
@@ -749,32 +749,32 @@ WriteSector:
         or      a
         jr      z,WS01
         ld      h,010h                  ; double-sided: 16 CP/M sectors per 1K group (2K block)
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     QuadDensityMask
         jr      z,WS01
         ld      h,020h                  ; double-sided quad density: 32 CP/M sectors per 1K group (4K block)
 WS01: ld      a,h
-        ld      (variable_b),a          ; remember the predicted streak length
+        ld      (physicalSectorSkip),a          ; remember the predicted streak length
         ld      a,(DiskNumber)
-        ld      (disk_var_d),a          ; remember which disk this streak applies to
+        ld      (lastSeenDiskNumber),a          ; remember which disk this streak applies to
         ld      hl,(TrackNumber)
-        ld      (somevar_05),hl         ; remember the starting track of the streak
+        ld      (workingTrack),hl         ; remember the starting track of the streak
         ld      a,(SectorNumber)
-        ld      (somevar_06),a          ; remember the starting sector of the streak
-WS02: ld      a,(variable_b)
+        ld      (workingDeblockSector),a          ; remember the starting sector of the streak
+WS02: ld      a,(physicalSectorSkip)
         or      a
         jp      z,WS04                ; no streak in progress - treat as a cache miss
         dec     a
-        ld      (variable_b),a          ; consume one step of the predicted streak
+        ld      (physicalSectorSkip),a          ; consume one step of the predicted streak
         ld      a,(DiskNumber)
-        ld      hl,disk_var_d
+        ld      hl,lastSeenDiskNumber
         cp      (hl)
         jp      nz,WS04               ; different disk than the streak expects - cache miss
-        ld      hl,somevar_05
+        ld      hl,workingTrack
         call    CompareTrackNumber               ; compare TrackNumber to the streak's expected track
         jp      nz,WS04               ; different track - cache miss
         ld      a,(SectorNumber)
-        ld      hl,somevar_06
+        ld      hl,workingDeblockSector
         cp      (hl)
         jp      nz,WS04               ; different sector than expected next - cache miss
         inc     (hl)                    ; this is the predicted sector - advance the streak's expected sector
@@ -782,16 +782,16 @@ WS02: ld      a,(variable_b)
         cp      028h                    ; rolled past the last sector (40) of the track?
         jp      c,WS03
         ld      (hl),000h               ; yes - wrap sector back to 0
-        ld      hl,(somevar_05)
+        ld      hl,(workingTrack)
         inc     hl                      ; and advance the streak's expected track
-        ld      (somevar_05),hl
+        ld      (workingTrack),hl
 WS03: xor     a
-        ld      (disk_var_a),a          ; cache hit - no real disk access needed for this sector
+        ld      (lastAccessMissedSectorCache),a          ; cache hit - no real disk access needed for this sector
         jp      WS05
 WS04: xor     a
-        ld      (variable_b),a          ; streak broken/absent - clear it
+        ld      (physicalSectorSkip),a          ; streak broken/absent - clear it
         inc     a
-        ld      (disk_var_a),a          ; cache miss - a real disk access is needed
+        ld      (lastAccessMissedSectorCache),a          ; cache miss - a real disk access is needed
 ;
 ; WS05 - shared tail of ReadSector and WriteSector.
 ;
@@ -800,11 +800,11 @@ WS04: xor     a
 ; so 8 consecutive CP/M sectors share one physical sector. Rather than
 ; doing a real FDC transfer for every 128-byte CP/M sector, the last
 ; 1K block read or written is kept in a buffer at 0fc16h, identified by
-; (somevar_01=disk, somevar_02=track, somevar_03=sector>>2) - this is a
+; (lastCachedDisk=disk, lastCachedTrack=track, lastCachedSector=sector>>2) - this is a
 ; *different*, coarser cache than the per-call "write streak"
 ; prediction done earlier in WriteSector.
 ;
-; variable_a (cleared to 0 in DiskInit) means "no cache identity is
+; headHomed (cleared to 0 in DiskInit) means "no cache identity is
 ; valid yet" - the very first disk access of the session always forces
 ; a fresh load. After that, this checks whether the requested 128-byte
 ; sector falls within the currently cached 1K block:
@@ -818,10 +818,10 @@ WS04: xor     a
 ;                   using the read routine to flush a dirty *write*
 ;                   buffer looks like it could be a latent bug, unless
 ;                   FdcReadSectorTransfer (which it calls) is doing something with
-;                   variable_b a read normally wouldn't.
+;                   physicalSectorSkip a read normally wouldn't.
 ;                   Then the new block's identity is recorded and, if
 ;                   this access also missed the disk-level cache flag
-;                   (disk_var_a from the streak logic), the new 1K
+;                   (lastAccessMissedSectorCache from the streak logic), the new 1K
 ;                   block is actually loaded in via WriteCachedSectorRetry (write
 ;                   retry routine - used here as "fill the buffer",
 ;                   which on reflection makes more sense terminology-
@@ -841,40 +841,40 @@ WS04: xor     a
 ;
 
 WS05: xor     a
-        ld      (somevar_04),a          ; clear the saved FDC status byte
+        ld      (ftcResultStatus),a          ; clear the saved FDC status byte
         ld      a,(SectorNumber)
         or      a
         rra
         or      a
         rra                             ; A = SectorNumber >> 2 (which 1K block this CP/M sector lives in)
-        ld      (somevar_07),a
-        ld      hl,variable_a
+        ld      (workingSector),a
+        ld      hl,headHomed
         ld      a,(hl)
         ld      (hl),001h               ; mark "a cache identity now exists" for next time
         or      a
         jp      z,WS07                ; no valid cache identity yet - force a fresh load below
         ld      a,(DiskNumber)
-        ld      hl,somevar_01
+        ld      hl,lastCachedDisk
         cp      (hl)
         jp      nz,WS06               ; different disk than what's cached - cache miss
-        ld      hl,somevar_02
+        ld      hl,lastCachedTrack
         call    CompareTrackNumber               ; compare TrackNumber to the cached track
         jp      nz,WS06               ; different track - cache miss
-        ld      a,(somevar_07)
-        ld      hl,somevar_03
+        ld      a,(workingSector)
+        ld      hl,lastCachedSector
         cp      (hl)
         jp      z,WS08                ; same 1K block - cache hit, use the buffer as-is
 WS06: ld      a,(CurrentTrack)        ; cache miss: is the currently cached block dirty?
         or      a
         call    nz,ReadCachedSectorRetry            ; yes - flush it to disk first (see caution in the comment above)
 WS07: ld      a,(DiskNumber)
-        ld      (somevar_01),a          ; record the new cache identity...
+        ld      (lastCachedDisk),a          ; record the new cache identity...
         ld      hl,(TrackNumber)
-        ld      (somevar_02),hl
-        ld      a,(somevar_07)
-        ld      (somevar_03),a
-        ld      a,(disk_var_a)          ; ...and if this access wasn't already satisfied by the write-streak
-        or      a                       ; logic earlier (disk_var_a<>0 means "really need real I/O"),
+        ld      (lastCachedTrack),hl
+        ld      a,(workingSector)
+        ld      (lastCachedSector),a
+        ld      a,(lastAccessMissedSectorCache)          ; ...and if this access wasn't already satisfied by the write-streak
+        or      a                       ; logic earlier (lastAccessMissedSectorCache<>0 means "really need real I/O"),
         call    nz,WriteCachedSectorRetry            ; load the new 1K block from disk into the cache buffer
         xor     a
         ld      (CurrentTrack),a        ; freshly loaded block is clean (not dirty)
@@ -902,14 +902,14 @@ WS08: ld      a,(SectorNumber)
 WS09: call    UnbankMoveRebank        ; switch to pure RAM banking, ldir the 128 bytes, switch back
         ld      a,(readWriteType)
         cp      001h                    ; was this a directory-sector write?
-        ld      a,(somevar_04)
+        ld      a,(ftcResultStatus)
         ret     nz                      ; no - done; return the last FDC status byte
         or      a
         ret     nz                      ; the FDC load/flush above already failed - report that, don't mask it
         xor     a
         ld      (CurrentTrack),a        ; directory write succeeded - force an immediate flush rather than
         call    ReadCachedSectorRetry               ; leaving it dirty, so CP/M's read-back sees real on-disk data
-        ld      a,(somevar_04)
+        ld      a,(ftcResultStatus)
         ret
 
 ;
@@ -947,7 +947,7 @@ CompareTrackNumber:
 ;                      copied to/from each drive's saved-format slot
 ;                      below, and is what actually gets OUT'd to the
 ;                      FDC's track register on a drive switch)
-;   variable_e/f/g/h - 3-byte saved format snapshot per drive (A/B/C/D):
+;   driveAFormatParams/f/g/h - 3-byte saved format snapshot per drive (A/B/C/D):
 ;                      byte 0 = saved current-track, bytes 1-2 unused/
 ;                      reserved here. 0xff in byte 0 means "this drive
 ;                      has never been selected/probed yet".
@@ -989,15 +989,15 @@ SDF01: ld      a,(DriveToSelect)
         ld      hl,0fe17h               ; HL -> current-track byte of the about-to-be-deselected drive
         ld      a,d
         cp      000h
-        ld      de,variable_e
+        ld      de,driveAFormatParams
         jr      z,SDF02
         cp      001h
-        ld      de,variable_f
+        ld      de,driveBFormatParams
         jr      z,SDF02
         cp      002h
-        ld      de,variable_g
+        ld      de,driveCFormatParams
         jr      z,SDF02
-        ld      de,variable_h
+        ld      de,driveDFormatParams
 SDF02: ld      a,(de)
         cp      0ffh
         jr      z,SDF03                ; previous drive was never probed - nothing to save
@@ -1007,16 +1007,16 @@ SDF02: ld      a,(de)
         pop     bc
         ld      de,0fe17h
 SDF03: ld      a,c
-        ld      hl,variable_e
+        ld      hl,driveAFormatParams
         cp      000h
         jr      z,SDF04
-        ld      hl,variable_f
+        ld      hl,driveBFormatParams
         cp      001h
         jr      z,SDF04
-        ld      hl,variable_g
+        ld      hl,driveCFormatParams
         cp      002h
         jr      z,SDF04
-        ld      hl,variable_h
+        ld      hl,driveDFormatParams
 SDF04: ld      a,(hl)
         cp      0ffh
         jr      z,SDF06                ; new drive has never been probed - go auto-detect its format below
@@ -1030,7 +1030,7 @@ SDF04: ld      a,(hl)
         or      a
         jr      z,SDF05
         ld      hl,DSDDDiskParameterBlock
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     QuadDensityMask
         jr      z,SDF05
         ld      hl,DSQDDiskParameterBlock
@@ -1061,7 +1061,7 @@ SDF06: pop     hl
         inc     hl
         ld      (hl),d                  ; this drive's DPB pointer field -> shared staging buffer (0fe6eh)
         ld      a,000h
-        ld      (variable_c),a          ; assume single density until proven otherwise
+        ld      (densityFormatFlags),a          ; assume single density until proven otherwise
         in      a,(SysPioAData)
         or      sysPioSideSelectSetMask
         out     (SysPioAData),a         ; select side 1 to probe for a second side
@@ -1079,7 +1079,7 @@ SDF06: pop     hl
         jr      c,SDF07                ; medium sector length -> DSDD
         ld      hl,DSQDDiskParameterBlock       ; large sector length -> quad density -> DSQD
         ld      a,QuadDensityMask
-        ld      (variable_c),a
+        ld      (densityFormatFlags),a
 SDF07: ld      b,0ffh                  ; got a real address mark on side 1 -> double-sided
 SDF08: ld      a,b
         ld      (IsDoubleSided),a
@@ -1097,21 +1097,21 @@ SDF08: ld      a,b
         cp      002h
         jr      z,SDF09                ; controller sees track 2 as track 2 -> normal density numbering
         ld      e,010h                  ; controller's track count doesn't match -> quad density flag bit
-SDF09: ld      a,(variable_c)
+SDF09: ld      a,(densityFormatFlags)
         or      e
-        ld      (variable_c),a
+        ld      (densityFormatFlags),a
         ld      hl,0fe17h
-        ld      de,variable_e
+        ld      de,driveAFormatParams
         ld      a,(DriveToSelect)
         cp      000h
         jr      z,SDF10
-        ld      de,variable_f
+        ld      de,driveBFormatParams
         cp      001h
         jr      z,SDF10
-        ld      de,variable_g
+        ld      de,driveCFormatParams
         cp      002h
         jr      z,SDF10
-        ld      de,variable_h
+        ld      de,driveDFormatParams
 SDF10: push    bc
         ld      bc,00003h               ; 3 bytes - save this drive's now-detected current-track/format snapshot
         ldir
@@ -1198,14 +1198,14 @@ SSS02: out     (SysPioAData),a
 ; (falls through from SeekSelectSide above; C = physical sector number on
 ; entry to SeekSelectSide, here reused/adjusted as the seek target).
 ;
-; If quad density is in effect (bit4 of variable_c), the requested
+; If quad density is in effect (bit4 of densityFormatFlags), the requested
 ; track is effectively doubled (C = C + C) since quad-density tracking
 ; (96 tpi) addresses physical tracks at twice the density of the
 ; standard 48 tpi numbering used elsewhere in this ROM.
 ;
 
 SeekToTrack:
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     010h                    ; quad-density flag bit
         ld      a,c
         jr      z,STT01
@@ -1234,7 +1234,7 @@ SetFdcSectorRegister:
         jr      z,SFSR01
         add     a,00ah                  ; side 1 -> offset sector number by 10
         ld      c,a
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     QuadDensityMask
         ld      a,c
         jr      z,SFSR01
@@ -1359,13 +1359,13 @@ WFFD01: in      a,(FdcStCmd)
         ret
 
 ;
-; ReadCachedSectorRetry - read the cached 1K physical sector (somevar_01/02/03)
+; ReadCachedSectorRetry - read the cached 1K physical sector (lastCachedDisk/02/03)
 ; into the buffer at 0fc16h, retrying on failure.
 ;
 ; Retry strategy: up to 15 (00fh) attempts at the current head position,
 ; and if those all fail, recalibrate (RestoreDriveToTrack0, seek to track 0) and try
 ; again - up to 3 (l=3) full recalibrate-and-retry cycles before giving
-; up. Returns Z on success; on total failure, A=0ffh (and somevar_04 is
+; up. Returns Z on success; on total failure, A=0ffh (and ftcResultStatus is
 ; left holding whatever the FDC's last status byte was).
 ;
 
@@ -1389,7 +1389,7 @@ RCSR02: push    hl
         ld      e,00fh                  ; 15 retries
         jr      RCSR02
 RCSR03:
-        ld      (somevar_04),a          ; save the FDC's final status byte
+        ld      (ftcResultStatus),a          ; save the FDC's final status byte
         ret     z
         dec     l
         jr      nz,RCSR01               ; more full cycles left - start over from scratch
@@ -1398,7 +1398,7 @@ RCSR03:
 
 ;
 ; WriteCachedSectorRetry - write the buffer at 0fc16h out to the cached 1K physical
-; sector (somevar_01/02/03), retrying on failure.
+; sector (), retrying on failure.
 ;
 ; Same retry strategy as ReadCachedSectorRetry above but without the outer 3-cycle
 ; loop (one pass of up to 4 recalibrate-and-retry cycles, 15 retries
@@ -1409,32 +1409,32 @@ WriteCachedSectorRetry:
         ld      de,DI01                 ; NOTE: DI01 used here purely for its numeric address value (040fh) -
                                         ; D=4 recalibrate cycles allowed total, E=0fh (15) retry count
 WCSR01: push    de
-        call    ReselectCachedDriveTrackSector               ; (re)select drive/track/side/sector from the cache
-        call    FdcWriteSectorTransfer               ; do the actual FDC write transfer
-        ld      (somevar_04),a          ; save the FDC's final status byte
+        call    ReselectCachedDriveTrackSector  ; (re)select drive/track/side/sector from the cache
+        call    FdcWriteSectorTransfer  ; do the actual FDC write transfer
+        ld      (ftcResultStatus),a     ; save the FDC's final status byte
         pop     de
         ret     z                       ; success
         dec     e
         jr      nz,WCSR01               ; more retries left at this head position - try again
         dec     d
         ret     z                       ; out of recalibrate cycles too - give up (returns NZ -> caller sees failure)
-        call    RestoreDriveToTrack0                  ; recalibrate (seek to track 0) and try again
+        call    RestoreDriveToTrack0    ; recalibrate (seek to track 0) and try again
         ld      e,00fh                  ; 15 retries
         jr      WCSR01
 
 ;
 ; ReselectCachedDriveTrackSector - re-issue drive select / seek / sector-program for the
-; cached track (somevar_01 = disk, somevar_02 = track, somevar_03 =
+; cached track (lastCachedDisk = disk, lastCachedTrack = track, lastCachedSector =
 ; sector>>2), used by both retry loops above before each attempt.
 ;
 
 ReselectCachedDriveTrackSector:
-        ld      a,(somevar_01)
+        ld      a,(lastCachedDisk)
         ld      c,a
         call    SelectDiskAndDetectFormat                  ; re-select the disk (also re-detects format if not yet probed)
-        ld      bc,(somevar_02)
+        ld      bc,(lastCachedTrack)
         call    SeekSelectSide               ; select the correct side and seek to the cached track
-        ld      a,(somevar_03)
+        ld      a,(lastCachedSector)
         ld      c,a
         call    SetFdcSectorRegister               ; program the FDC sector register
         ret
@@ -1470,7 +1470,7 @@ FRST01: call    SetDriveSelectOutput
         cp      0ach                    ; is this a write?
         jr      z,FRST05
         push    af
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     010h                    ; quad density?
         jr      z,FRST02
         in      a,(FdcTrk)
@@ -1486,7 +1486,7 @@ FRST04: halt                            ; loop until we have read 256 more bytes
         jr      nz,FRST04
         jr      FRST09
 FRST05: push    af
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     010h                    ; quad density?
         jr      z,FRST06
         in      a,(FdcTrk)
@@ -1507,7 +1507,7 @@ FRST09:
         ei
         call    WaitForFdcDone
         push    af
-        ld      a,(variable_c)
+        ld      a,(densityFormatFlags)
         and     010h                    ; quad density?
         jr      z,FRST10
         in      a,(FdcTrk)
