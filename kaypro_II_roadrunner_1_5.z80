@@ -275,17 +275,17 @@ sysPioSideSelectClrMask    equ     not sysPioSideSelectSetMask
 ; Comments give the conventional CP/M BIOS name where one exists.
 ;
 
-        jp Start                        ; BOOT:   cold boot entry point
+        jp Start                        ; BOOT:    cold boot entry point
         jp DiskInit                     ; (custom) one-time disk subsystem init, called from Start
         jp DisplayInit                  ; (custom) one-time display/terminal init, called from Start
         jp DeviceInit                   ; (custom) programs the SIO/PIO chips from DeviceInitTable
-        jp HomeHead                     ; HOME:   seek the selected drive's head to track 0
-        jp SelectDisk                   ; SELDSK: select logical disk drive (C = drive number)
-        jp SetTrack                     ; SETTRK: set track number (BC = track)
-        jp SetSector                    ; SETSEC: set sector number (C = sector)
-        jp SetDma                       ; SETDMA: set DMA (memory transfer) address (BC = address)
-        jp ReadSector                   ; READ:   read the selected sector into the DMA address
-        jp WriteSector                  ; WRITE:  write the DMA address out to the selected sector (C = mode)
+        jp HomeHead                     ; HOME:    seek the selected drive's head to track 0
+        jp SelectDisk                   ; SELDSK:  select logical disk drive (C = drive number)
+        jp SetTrack                     ; SETTRK:  set track number (BC = track)
+        jp SetSector                    ; SETSEC:  set sector number (C = sector)
+        jp SetDma                       ; SETDMA:  set DMA (memory transfer) address (BC = address)
+        jp ReadSector                   ; READ:    read the selected sector into the DMA address
+        jp WriteSector                  ; WRITE:   write the DMA address out to the selected sector (C = mode)
         jp SectorTranslate              ; SECTRAN: translate logical to physical sector number (for skew)
         jp DiskOn                       ; (custom) turn the selected drive's motor on
         jp DiskOff                      ; (custom) turn the drive motor off
@@ -295,10 +295,10 @@ sysPioSideSelectClrMask    equ     not sysPioSideSelectSetMask
         jp TTYInStat                    ; (custom) serial/modem input status
         jp TTYIn                        ; (custom) read a byte from the serial/modem port
         jp TTYOut                       ; (custom) write a byte to the serial/modem port
-        jp ListStat                     ; LIST status: parallel printer ready status
-        jp ListOut                      ; LIST:   write a byte to the parallel printer
+        jp ListStat                     ; LIST:    status parallel printer ready status
+        jp ListOut                      ; LIST:    write a byte to the parallel printer
         jp TTYOutStat                   ; (custom) serial/modem output (transmit) status
-        jp DisplayOut                   ; CONOUT: write a byte to the screen (drives the terminal emulator)
+        jp DisplayOut                   ; CONOUT:  write a byte to the screen (drives the terminal emulator)
         jp DelayMS                      ; (custom) busy-wait delay, roughly B milliseconds
 
 ;
