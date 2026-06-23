@@ -93,14 +93,13 @@ DiskNumber:                     equ 0fc00h     ; (byte) currently selected logic
 TrackNumber:                    equ 0fc01h     ; (word) requested track number
 SectorNumber:                   equ 0fc03h     ; (byte) requested CP/M (128-byte) sector number
 headHomed:                      equ 0fc09h     ; flag: set once the head has been homed/recalibrated this session
-CurrentTrack:                   equ 0fc0ah     ; despite the name, this is really a "dirty" flag: nonzero means
-                                               ; the 1K sector buffer at 0fc16h holds a write that hasn't been
-                                               ; flushed to disk yet (see ReadSector/WriteSector's shared tail
-                                               ; at WS05, and HomeHead, which forces a real FDC Restore only
+sectorBufferDirty:              equ 0fc0ah     ; this is a "dirty" flag: nonzero means the 1K sector buffer at 0fc16h holds
+                                               ; a write that hasn't been flushed to disk yet (see ReadSector/WriteSector's
+                                               ; shared tail at WS05, and HomeHead, which forces a real FDC Restore only
                                                ; when this is set)
 physicalSectorSkip:             equ 0fc0bh     ; pending physical-sector-skip count used by the sector cache logic
 lastSeenDiskNumber:             equ 0fc0ch     ; last disk number seen by the per-1K-sector cache (see WS02)
-lastAccessMissedSectorCache:    equ 0fc11h     ; flag: nonzero => last access missed the sector cache, needs real I/O
+lastAccessMissed:               equ 0fc11h     ; flag: nonzero => last access missed the sector cache, needs real I/O
 writeIfZero:                    equ 0fc12h     ; 0 = this is a write call, nonzero = this is a read call
 readWriteType:                  equ 0fc13h     ; write mode passed in C to WriteSector (0/1/2, see WriteSector)
 DmaAddress:                     equ 0fc14h     ; (word) current DMA (memory transfer) address for read/write
@@ -110,21 +109,20 @@ lastCachedSector:               equ 0fc07h     ; last (sector>>2) value seen by 
 ftcResultStatus:                equ 0fc10h     ; FDC result/status byte returned from the low-level read/write
 workingTrack:                   equ 0fc0dh     ; (word) working track number for the current 1K-sector op
 workingDeblockSector:           equ 0fc0fh     ; working CP/M-sector-within-1K-block index (0-3)
-workingSecto:                   equ 0fc08h     ; SectorNumber >> 2 (1K-sector-block index within the track)
+workingSector:                  equ 0fc08h     ; SectorNumber >> 2 (1K-sector-block index within the track)
 
 ;
 ; Per-drive disk parameter block cache and floppy format state.
-; (fe16h-fe5fh; see DataBlock1 below for the layout of each drive's slot)
+; (fe16h-fe5fh; see DiskParameterHeaders below for the layout of each drive's slot)
 ;
-
-DriveToSelect:                  equ 0fe16h     ; logical drive number last selected (0xff = none yet)
-
-densityFormatFlags:             equ 0fe18h     ; current density/format flags for selected drive (bit0=quad density)
 
 QuadDensityBit                  equ 0
 
 QuadDensityMask                 equ 1 shl QuadDensityBit
 
+selectedDrive:                  equ 0fe16h     ; logical drive number last selected (0xff = none yet)
+currentTrack:                   equ 0fe17h     ; current-track byte for whichever drive is now selected
+densityFormatFlags:             equ 0fe18h     ; current density/format flags for selected drive (bit0=quad density)
 IsDoubleSided:                  equ 0fe19h     ; flag: nonzero if the currently selected drive is double-sided
 driveAFormatParams:             equ 0fe1ah     ; saved per-drive format params, drive A: (3 bytes; 0xff = unprobed)
 driveBFormatParams:             equ 0fe1dh     ; saved per-drive format params, drive B: (3 bytes; 0xff = unprobed)
@@ -133,7 +131,18 @@ driveDFormatParams:             equ 0fe23h     ; saved per-drive format params, 
 DisplayUnknown:                 equ 0fe26h     ; target column operand for cursor-positioning escape (ESC = row col)
 DisplayCursorPosition:          equ 0fe27h     ; (word) pointer into DisplayBuffer for the current cursor position
 DisplayAlphabetSelect:          equ 0fe29h     ; AND-mask applied to high-bit chars: 07fh=ASCII, 01fh=Greek
-DataBlock1:                     equ 0fe2ah     ; base of the 4-drive disk-parameter-header working area (0x53 bytes)
+DiskParameterHeaders:           equ 0fe2ah     ; base of the 4-drive disk-parameter-header working area (0x53 bytes)
+diskParameterBlock:             equ 0fe6eh     ; disk parameter block staging area, active driver has its dpb copied here
+
+checksumVectorA:                equ 0fe7eh      ; disk checksum tables
+checksumVectorB:                equ 0fe96h
+checksumVectorC:                equ 0feaeh
+checksumVectorD:                equ 0fec6h
+
+allocationVectorA:              equ 0fedeh      ; disk allocation tables
+allocationVectorB:              equ 0fef7h
+allocationVectorC:              equ 0ff10h
+allocationVectorD:              equ 0ff29h
 
 ;
 ; Live (in-use) configuration bytes and runtime work area.
@@ -151,7 +160,8 @@ DisplayEchoEnable:              equ 0ff47h     ; nonzero = echo all DisplayOut c
 BufferEnable:                   equ 0ff48h     ; 0 = direct keyboard I/O, 0xff = use the type-ahead Buffer
 UnbankMoveRebank:               equ 0ff49h     ; RAM copy of the relocated bank-switching block-move routine
 BufferContentCount:             equ 0ff60h     ; number of bytes currently queued in the type-ahead Buffer
-Buffer:                         equ 0ff61h     ; type-ahead keyboard buffer (up to 31 (01fh) bytes)
+typeAheadBuffer:                equ 0ff61h     ; type-ahead keyboard buffer (up to 31 (01fh) bytes)
+directoryBuffer:                equ 0ff80h     ; disk directory buffer used by all drives - 128 bytes
 
 CpmSectorSize                   equ 080h       ; CP/M logical sector size in bytes (128)
 
@@ -159,14 +169,18 @@ CpmSectorSize                   equ 080h       ; CP/M logical sector size in byt
 ; Special Ascii characters
 ;
 
-sub:            EQU     01ah    ; SUB - clears the screen when received by the terminal emulator
-escape:         EQU     01bh    ; ESC - starts a terminal escape sequence
-tab:            EQU     008h    ; ASCII BS (backspace); named "tab" by the original author but the terminal
-                                ; emulator (DisplayOut) treats 008h as cursor-left, not a tab stop. Used
-                                ; here at the end of Immediate strings, just before the 0 terminator.
-cr              EQU     00dh    ; carriage return
-lf              equ     00ah    ; line feed
-bell            equ     007h    ; bell (used to ring the keyboard's piezo beeper via KeyboardOut)
+etx:                            equ     003h    ; ETX  - ctrl-C - end of text
+bell:                           equ     007h    ; BELL - ctrl-G - bell (used to ring the keyboard's piezo beeper via KeyboardOut)
+backspace:                      equ     008h    ; BS   - ctrl-H - backspace
+lf:                             equ     00ah    ; LF   - ctrl-J - line feed
+vt:                             equ     00bh    ; VT   - ctrl-K - vertical tab
+ff:                             equ     00ch    ; FF   - ctrl-L - form feed
+cr:                             equ     00dh    ; CR   - ctrl-M - carriage return
+etb:                            equ     017h    ; ETB  - ctrl-W - end of transmission
+can:                            equ     018h    ; CAN  - ctrl-X - cancel
+sub:                            equ     01ah    ; SUB  - ctrl-Z - clears the screen when received by the terminal emulator
+escape:                         equ     01bh    ; ESC  - ctrl-[ - starts a terminal escape sequence
+rs:                             equ     01eh    ; RS   - ctrl-^ - record seperator
 
 ;
 ; I/O port assignments
@@ -178,28 +192,28 @@ bell            equ     007h    ; bell (used to ring the keyboard's piezo beeper
 ; drive select, motor, side select, density, and printer strobe/ready.
 ;
 
-BaudA           equ     00h     ; baud rate generator port for serial (TTY) SIO channel
-BaudB           equ     0ch     ; baud rate generator port for keyboard SIO channel
+BaudA                   equ     00h     ; baud rate generator port for serial (TTY) SIO channel
+BaudB                   equ     0ch     ; baud rate generator port for keyboard SIO channel
 
-KeySioCtl:      equ     07h     ; Z80 SIO control port, keyboard channel
-KeySioData:     equ     05h     ; Z80 SIO data port, keyboard channel
-SerSioCtl:      equ     06h     ; Z80 SIO control port, serial/modem channel
-SerSioData:     equ     04h     ; Z80 SIO data port, serial/modem channel
+KeySioCtl:              equ     07h     ; Z80 SIO control port, keyboard channel
+KeySioData:             equ     05h     ; Z80 SIO data port, keyboard channel
+SerSioCtl:              equ     06h     ; Z80 SIO control port, serial/modem channel
+SerSioData:             equ     04h     ; Z80 SIO data port, serial/modem channel
 
-PtrPioACtl:     equ     09h     ; Z80 PIO (printer) control port, port A
-PtrPioAData:    equ     08h     ; Z80 PIO (printer) data port, port A (parallel printer data lines)
-PtrPioBCtl:     equ     0bh     ; Z80 PIO (printer) control port, port B
-PtrPioBData:    equ     0ah     ; Z80 PIO (printer) data port, port B
+PtrPioACtl:             equ     09h     ; Z80 PIO (printer) control port, port A
+PtrPioAData:            equ     08h     ; Z80 PIO (printer) data port, port A (parallel printer data lines)
+PtrPioBCtl:             equ     0bh     ; Z80 PIO (printer) control port, port B
+PtrPioBData:            equ     0ah     ; Z80 PIO (printer) data port, port B
 
-FdcStCmd:       equ     10h     ; floppy disk controller status (read) / command (write) register
-FdcTrk:         equ     11h     ; floppy disk controller track register
-FdcSec:         equ     12h     ; floppy disk controller sector register
-FdcData:        equ     13h     ; floppy disk controller data register
+FdcStCmd:               equ     10h     ; floppy disk controller status (read) / command (write) register
+FdcTrk:                 equ     11h     ; floppy disk controller track register
+FdcSec:                 equ     12h     ; floppy disk controller sector register
+FdcData:                equ     13h     ; floppy disk controller data register
 
-SysPioACtl:     equ     1dh     ; Z80 PIO (system) control port, port A
-SysPioAData:    equ     1ch     ; Z80 PIO (system) data port, port A - drive/motor/side/density/printer control
-SysPioBCtl:     equ     1fh     ; Z80 PIO (system) control port, port B
-SysPioBData:    equ     1eh     ; Z80 PIO (system) data port, port B
+SysPioACtl:             equ     1dh     ; Z80 PIO (system) control port, port A
+SysPioAData:            equ     1ch     ; Z80 PIO (system) data port, port A - drive/motor/side/density/printer control
+SysPioBCtl:             equ     1fh     ; Z80 PIO (system) control port, port B
+SysPioBData:            equ     1eh     ; Z80 PIO (system) data port, port B
 
 ;
 ; Floppy disk controller commands (WD179x-family type I/II/III command set).
@@ -235,7 +249,7 @@ fdcReadAddress15ms      equ     fdcReadAddress + fdcFifteenMsDelMask  ; Read Add
 ; fdc status register bits
 ;
 
-fdcBusyBit      equ 0   ; status bit 0: controller busy executing a command
+fdcBusyBit              equ     0       ; status bit 0: controller busy executing a command
 
 ;
 ; System pio bits (SysPioAData, port 1ch)
@@ -261,31 +275,31 @@ sysPioSideSelectClrMask    equ     not sysPioSideSelectSetMask
 ; Comments give the conventional CP/M BIOS name where one exists.
 ;
 
-        jp Start            ; 0003h - BOOT:   cold boot entry point
-        jp DiskInit         ; 0006h - (custom) one-time disk subsystem init, called from Start
-        jp DisplayInit      ; 0009h - (custom) one-time display/terminal init, called from Start
-        jp DeviceInit       ; 000ch - (custom) programs the SIO/PIO chips from DeviceInitTable
-        jp HomeHead         ; 000fh - HOME:   seek the selected drive's head to track 0
-        jp SelectDisk       ; 0012h - SELDSK: select logical disk drive (C = drive number)
-        jp SetTrack         ; 0015h - SETTRK: set track number (BC = track)
-        jp SetSector        ; 0018h - SETSEC: set sector number (C = sector)
-        jp SetDma           ; 001bh - SETDMA: set DMA (memory transfer) address (BC = address)
-        jp ReadSector       ; 001eh - READ:   read the selected sector into the DMA address
-        jp WriteSector      ; 0021h - WRITE:  write the DMA address out to the selected sector (C = mode)
-        jp SectorTranslate  ; 0024h - SECTRAN: translate logical to physical sector number (for skew)
-        jp DiskOn           ; 0027h - (custom) turn the selected drive's motor on
-        jp DiskOff          ; 002ah - (custom) turn the drive motor off
-        jp KeyboardStat     ; 002dh - (custom) keyboard input status (console status, CONST-like)
-        jp KeyboardIn       ; 0030h - (custom) read a key from the keyboard (console in, CONIN-like)
-        jp KeyboardOut      ; 0033h - (custom) send a byte to the keyboard controller (e.g. key click cmd)
-        jp TTYInStat        ; 0036h - (custom) serial/modem input status
-        jp TTYIn            ; 0039h - (custom) read a byte from the serial/modem port
-        jp TTYOut           ; 003ch - (custom) write a byte to the serial/modem port
-        jp ListStat         ; 003fh - LIST status: parallel printer ready status
-        jp ListOut          ; 0042h - LIST:   write a byte to the parallel printer
-        jp TTYOutStat       ; 0045h - (custom) serial/modem output (transmit) status
-        jp DisplayOut       ; 0048h - CONOUT: write a byte to the screen (drives the terminal emulator)
-        jp DelayMS          ; 004bh - (custom) busy-wait delay, roughly B milliseconds
+        jp Start                        ; BOOT:   cold boot entry point
+        jp DiskInit                     ; (custom) one-time disk subsystem init, called from Start
+        jp DisplayInit                  ; (custom) one-time display/terminal init, called from Start
+        jp DeviceInit                   ; (custom) programs the SIO/PIO chips from DeviceInitTable
+        jp HomeHead                     ; HOME:   seek the selected drive's head to track 0
+        jp SelectDisk                   ; SELDSK: select logical disk drive (C = drive number)
+        jp SetTrack                     ; SETTRK: set track number (BC = track)
+        jp SetSector                    ; SETSEC: set sector number (C = sector)
+        jp SetDma                       ; SETDMA: set DMA (memory transfer) address (BC = address)
+        jp ReadSector                   ; READ:   read the selected sector into the DMA address
+        jp WriteSector                  ; WRITE:  write the DMA address out to the selected sector (C = mode)
+        jp SectorTranslate              ; SECTRAN: translate logical to physical sector number (for skew)
+        jp DiskOn                       ; (custom) turn the selected drive's motor on
+        jp DiskOff                      ; (custom) turn the drive motor off
+        jp KeyboardStat                 ; (custom) keyboard input status (console status, CONST-like)
+        jp KeyboardIn                   ; (custom) read a key from the keyboard (console in, CONIN-like)
+        jp KeyboardOut                  ; (custom) send a byte to the keyboard controller (e.g. key click cmd)
+        jp TTYInStat                    ; (custom) serial/modem input status
+        jp TTYIn                        ; (custom) read a byte from the serial/modem port
+        jp TTYOut                       ; (custom) write a byte to the serial/modem port
+        jp ListStat                     ; LIST status: parallel printer ready status
+        jp ListOut                      ; LIST:   write a byte to the parallel printer
+        jp TTYOutStat                   ; (custom) serial/modem output (transmit) status
+        jp DisplayOut                   ; CONOUT: write a byte to the screen (drives the terminal emulator)
+        jp DelayMS                      ; (custom) busy-wait delay, roughly B milliseconds
 
 ;
 ; This is where Start begins
@@ -308,7 +322,7 @@ Start:
 ; EPROM rather than a transcription mistake here. Left as-is/unverified.
 ;
 
-        defb    0edh            ; This makes no sense!!!
+        defb    0edh                    ; This makes no sense!!!
         defb    039h
         defb    03fh
 
@@ -316,14 +330,14 @@ Start:
 ; end of corrupted area
 ;
 
-        ld      a,003h          ; Init the keyboard side of SIO
+        ld      a,003h                  ; Init the keyboard side of SIO
         out     (PtrPioBCtl),a
         ld      a,00fh
         out     (PtrPioBCtl),a
         ld      a,000h
         out     (PtrPioBData),a
 
-        jp      StartPhase2     ; Skip over the Greeting
+        jp      StartPhase2             ; Skip over the Greeting
 
 ;
 ; Hidden version number
@@ -363,17 +377,17 @@ nmi:    ret     ; Just return, the actual io is done by halting
 ;
 
 StartPhase2:
-        ld      sp,0ffffh       ; load the stack pointer. Always good to do
-        ld      b,00ah          ; delay for a bit to allow hardware stabilization
+        ld      sp,0ffffh               ; load the stack pointer. Always good to do
+        ld      b,00ah                  ; delay for a bit to allow hardware stabilization
         call    DelayMS
-        ld      a,000h          ;
+        ld      a,000h                  ;
         ld      (BufferContentCount),a
         ld      (DisplayEchoEnable),a
-        call    DeviceInit      ; init the hardware
+        call    DeviceInit              ; init the hardware
         call    DisplayInit
         call    DiskInit
 
-        call    Immediate       ; print the greeting message
+        call    Immediate               ; print the greeting message
 
 ;
 ; Greeting message
@@ -403,7 +417,7 @@ StartPhase2:
         defb    '*        GREETINGS!   +     *'
         defb    escape, '=', ' '+16, ' '+16
         defb    '     Please insert a disk into drive A...'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; Start continues here - read the boot sector (track 0, sector 1) of
@@ -429,7 +443,7 @@ StartPhase3:
         or      a
         jp      nz,CantReadDisk
 
-        call    Immediate       ; Print the thankyou message
+        call    Immediate               ; Print the thankyou message
 
 ;
 ; Thankyou message
@@ -446,7 +460,7 @@ StartPhase3:
 
         defb    sub, escape, '=', ' '+12, ' '+34
         defb    'Thank You !'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; Start continues here
@@ -457,7 +471,7 @@ StartGetSaved:
         ld      a,(SavedCursorCharAndBlinkEnable)
         or      a
         jr      nz,SGS01
-        ld      a,01fh          ; no saved config yet (fresh/blank boot sector) -> default cursor+blink on
+        ld      a,01fh                  ; no saved config yet (fresh/blank boot sector) -> default cursor+blink on
 SGS01:
         ld      (CursorCharAndBlinkEnable),a
         ld      a,(SavedDumpCharacter)
@@ -471,7 +485,7 @@ SGS01:
         or      a
         jr      z,StartGetStandard      ; key click was disabled -> tell the keyboard controller to turn it off
 
-        ld      a,008h          ; disable key click
+        ld      a,008h                  ; disable key click
         out     (KeySioData),a
 
 ;
@@ -486,9 +500,9 @@ StartGetStandard:
         ld      bc,(SectorCount)
         ld      b,c                     ; B = number of sectors left to load (loop counter)
 
-StartFirstSector:               ; Get first sector of OS
+StartFirstSector:                       ; Get first sector of OS
         ld      c,001h
-StartNextSector:                ; Get next sector of OS
+StartNextSector:                        ; Get next sector of OS
         push    bc
         call    SetSector
         call    ReadSector
@@ -519,7 +533,7 @@ StartNextSector:                ; Get next sector of OS
 ;
 
 CantReadDisk:
-        call    Immediate       ; Print cant read disk message
+        call    Immediate               ; Print cant read disk message
 
 ;
 ; I cannot read your diskette message
@@ -534,13 +548,13 @@ CantReadDisk:
 ;
 
         call    DiskOff
-LockUp: jr      LockUp          ; spin forever - only a hardware reset gets out of here
+LockUp: jr      LockUp                  ; spin forever - only a hardware reset gets out of here
 
 ;
-; DataBlock1InRom_start
+; DiskParameterHeadersRom
 ;
 ; ROM master copy of the 4-drive disk-parameter-header working area,
-; copied to RAM at DataBlock1 (0fe2ah) by DiskInit (0x53 = 83 bytes).
+; copied to RAM at DiskParameterHeaders (0fe2ah) by DiskInit (0x53 = 83 bytes).
 ; This looks like 4 abbreviated/CP/M-style Disk Parameter Headers laid
 ; out back-to-back with a 17-byte stride (one byte shorter than a
 ; standard 16-byte CP/M DPH plus a leading pad byte), each containing:
@@ -560,16 +574,40 @@ LockUp: jr      LockUp          ; spin forever - only a hardware reset gets out 
 ; but it's worth knowing about if you ever resize this table.
 ;
 
-DataBlock1InRom_start:
-        defb    000h, 000h, 000h, 000h, 000h, 000h, 000h, 000h
-        defb    080h, 0ffh, 06eh, 0feh, 07eh, 0feh, 0deh, 0feh
-        defb    000h, 000h, 000h, 000h, 000h, 000h, 000h, 000h
-        defb    000h, 080h, 0ffh, 06eh, 0feh, 096h, 0feh, 0f7h
-        defb    0feh, 000h, 000h, 000h, 000h, 000h, 000h, 000h
-        defb    000h, 000h, 080h, 0ffh, 06eh, 0feh, 0aeh, 0feh
-        defb    010h, 0ffh, 000h, 000h, 000h, 000h, 000h, 000h
-        defb    000h, 000h, 000h, 080h, 0ffh, 06eh, 0feh, 0c6h
-        defb    0feh, 029h, 0ffh, 000h
+sectorTranslation     equ     00000h    ; sector translation table address of 0 means no translation
+
+DiskParameterHeadersRom:
+dphA:   defw    sectorTranslation
+        defw    00000h, 00000h, 00000h
+        defw    directoryBuffer
+        defw    diskParameterBlock
+        defw    checksumVectorA
+        defw    allocationVectorA
+        defb    000h
+
+dphB:   defw    sectorTranslation
+        defw    00000h, 00000h, 00000h
+        defw    directoryBuffer
+        defw    diskParameterBlock
+        defw    checksumVectorB
+        defw    allocationVectorB
+        defb    000h
+
+dphC:   defw    sectorTranslation
+        defw    00000h, 00000h, 00000h
+        defw    directoryBuffer
+        defw    diskParameterBlock
+        defw    checksumVectorC
+        defw    allocationVectorC
+        defb    000h
+
+dphD:   defw    sectorTranslation
+        defw    00000h, 00000h, 00000h
+        defw    directoryBuffer
+        defw    diskParameterBlock
+        defw    checksumVectorD
+        defw    allocationVectorD
+        defb    000h
 
 ;
 ; Single sided, double density 48 tpi disk parameter block
@@ -582,8 +620,16 @@ DataBlock1InRom_start:
 ;
 
 SSDDDiskParameterBlock:
-        defb    028h, 000h, 003h, 007h, 000h, 0c2h, 000h, 03fh
-        defb    000h, 0f0h, 000h, 010h, 000h, 001h, 000h
+        defw    00028h          ; spt - 40 x 128 - byte sectors/track
+        defb    003h            ; bsh - 1k blocks
+        defb    007h            ; blm - 1k blocks
+        defb    000h            ; exm - 0
+        defw    000c2h          ; dsm - 194 blocks
+        defw    0003fh          ; drm - 64 directory entries
+        defb    0f0h            ; al0 - 4 reserved directory blocks
+        defb    000h            ; al1 - 4 reserved directory blocks
+        defw    00010h          ; cks - 16
+        defw    00001h          ; off - reserved track
 
 ;
 ; Double sided, double density 48 tpi disk parameter block
@@ -594,8 +640,16 @@ SSDDDiskParameterBlock:
 ;
 
 DSDDDiskParameterBlock:
-        defb    028h, 000h, 004h, 00fh, 001h, 0c4h, 000h, 03fh
-        defb    000h, 0c0h, 000h, 010h, 000h, 001h, 000h
+        defw    00028h          ; spt - 40 x 128 - byte sectors/track
+        defb    004h            ; bsh - 2k blocks
+        defb    00fh            ; blm - 2k blocks
+        defb    001h            ; exm - 1
+        defw    000c4h          ; dsm - 196 blocks
+        defw    0003fh          ; drm - 64 directory entries
+        defb    0c0h            ; al0 - 2 reserved directory blocks
+        defb    000h            ; al1 - 2 reserved directory blocks
+        defw    00010h          ; cks - 16
+        defw    00001h          ; off - 1 reserved track
 
 ;
 ; Double sided, double density 96 tpi disk parameter block
@@ -605,9 +659,17 @@ DSDDDiskParameterBlock:
 ;   AL0=080h AL1=00h (1 reserved dir block)  CKS=0018h (24)  OFF=0002h
 ;
 
-DSQDDiskParameterBlock
-        defb    028h, 000h, 005h, 01fh, 003h, 0c4h, 000h, 05fh
-        defb    000h, 080h, 000h, 018h, 000h, 002h, 000h
+DSQDDiskParameterBlock:
+        defw    00028h          ; spt - 40 x 128 - byte sectors/track
+        defb    005h            ; bsh - 4k blocks
+        defb    01fh            ; blm - 4k blocks
+        defb    003h            ; exm - 3
+        defw    000c4h          ; dsm - 196 blocks
+        defw    0005fh          ; drm - 96 directory entries
+        defb    080h            ; al0 - 1 reserved directory blocks
+        defb    000h            ; al1 - 1 reserved directory blocks
+        defw    00018h          ; cks - 24
+        defw    00002h          ; off - 2 reserved tracks
 
 ;
 ; DiskInit function
@@ -620,23 +682,23 @@ DSQDDiskParameterBlock
 DiskInit:
         ld      hl,UnbankMoveRebankInRom
         ld      de,UnbankMoveRebank
-        ld      bc,00dh                ; 13 bytes - size of UnbankMoveRebankInRom
+        ld      bc,00dh                         ; 13 bytes - size of UnbankMoveRebankInRom
         ldir
-        ld      hl,DataBlock1InRom_start
-        ld      de,DataBlock1
-        ld      bc,053h                ; 83 bytes - see note above DataBlock1InRom_start
+        ld      hl,DiskParameterHeadersRom
+        ld      de,DiskParameterHeaders
+        ld      bc,053h                         ; 83 bytes - see note above DiskParameterHeadersRom
         ldir
         xor     a
-        ld      (headHomed),a         ; clear "head homed" flag
-        ld      (physicalSectorSkip),a         ; clear sector-cache skip counter
+        ld      (headHomed),a                   ; clear "head homed" flag
+        ld      (physicalSectorSkip),a          ; clear sector-cache skip counter
         ld      a,000h
-        ld      (densityFormatFlags),a         ; clear density/format flags
+        ld      (densityFormatFlags),a          ; clear density/format flags
         ld      a,0ffh
-        ld      (DriveToSelect),a      ; no drive selected yet
-        ld      (driveAFormatParams),a         ; mark drive A: format as "unprobed"
-        ld      (driveBFormatParams),a         ; mark drive B: format as "unprobed"
-        ld      (driveCFormatParams),a         ; mark drive C: format as "unprobed"
-DI01:   ld      (driveDFormatParams),a         ; mark drive D: format as "unprobed"
+        ld      (selectedDrive),a               ; no drive selected yet
+        ld      (driveAFormatParams),a          ; mark drive A: format as "unprobed"
+        ld      (driveBFormatParams),a          ; mark drive B: format as "unprobed"
+        ld      (driveCFormatParams),a          ; mark drive C: format as "unprobed"
+DI01:   ld      (driveDFormatParams),a          ; mark drive D: format as "unprobed"
         ret
 
 
@@ -684,7 +746,7 @@ SetTrack:
 ;
 ; Always issues a Restore command to the FDC (falls through to RestoreDriveToTrack0
 ; either way - HH01 is just the next instruction after the branch).
-; The only effect of checking CurrentTrack (the cache-dirty flag) here
+; The only effect of checking sectorBufferDirty (the cache-dirty flag) here
 ; is: if the 1K sector cache is *not* dirty, headHomed ("head homed
 ; since DiskInit" flag) is explicitly cleared first, which appears to
 ; just be defensive/redundant given RestoreDriveToTrack0's own behaviour - it does
@@ -692,11 +754,11 @@ SetTrack:
 ;
 
 HomeHead:
-        ld      a,(CurrentTrack)
+        ld      a,(sectorBufferDirty)
         or      a
         jp      nz,HH01
-        ld      (headHomed),a          ; cache wasn't dirty - also clear the "head homed" flag
-HH01: jp      RestoreDriveToTrack0                  ; always: issue an actual FDC Restore (seek to track 0)
+        ld      (headHomed),a                   ; cache wasn't dirty - also clear the "head homed" flag
+HH01:   jp      RestoreDriveToTrack0            ; always: issue an actual FDC Restore (seek to track 0)
 
 ;
 ; ReadSector function (CP/M READ: read SectorNumber of TrackNumber on
@@ -707,12 +769,12 @@ HH01: jp      RestoreDriveToTrack0                  ; always: issue an actual FD
 ;
 
 ReadSector:
-        call    CheckKeyboardAndBuffer  ; service the keyboard while we have a moment (avoid dropped keys)
+        call    CheckKeyboardAndBuffer          ; service the keyboard while we have a moment (avoid dropped keys)
         xor     a
         ld      (physicalSectorSkip),a          ; clear the write-streak prediction counter (this is a read, not a write)
         ld      a,001h
-        ld      (writeIfZero),a         ; nonzero = this is a read
-        ld      (lastAccessMissedSectorCache),a          ; force "cache miss" - always actually read for a plain ReadSector call
+        ld      (writeIfZero),a                 ; nonzero = this is a read
+        ld      (lastAccessMissed),a            ; force "cache miss" - always actually read for a plain ReadSector call
         ld      a,002h
         ld      (readWriteType),a
         jp      WS05
@@ -739,59 +801,59 @@ ReadSector:
 WriteSector:
         call    CheckKeyboardAndBuffer
         xor     a
-        ld      (writeIfZero),a         ; 0 = this is a write
+        ld      (writeIfZero),a                 ; 0 = this is a write
         ld      a,c
         ld      (readWriteType),a
-        cp      002h                    ; mode 2 = first sector of a new allocation block?
+        cp      002h                            ; mode 2 = first sector of a new allocation block?
         jp      nz,WS02
-        ld      h,008h                  ; default: 8 x 128-byte CP/M sectors per 1K physical sector (SSDD)
+        ld      h,008h                          ; default: 8 x 128-byte CP/M sectors per 1K physical sector (SSDD)
         ld      a,(IsDoubleSided)
         or      a
         jr      z,WS01
-        ld      h,010h                  ; double-sided: 16 CP/M sectors per 1K group (2K block)
+        ld      h,010h                          ; double-sided: 16 CP/M sectors per 1K group (2K block)
         ld      a,(densityFormatFlags)
         and     QuadDensityMask
         jr      z,WS01
-        ld      h,020h                  ; double-sided quad density: 32 CP/M sectors per 1K group (4K block)
-WS01: ld      a,h
+        ld      h,020h                          ; double-sided quad density: 32 CP/M sectors per 1K group (4K block)
+WS01:   ld      a,h
         ld      (physicalSectorSkip),a          ; remember the predicted streak length
         ld      a,(DiskNumber)
         ld      (lastSeenDiskNumber),a          ; remember which disk this streak applies to
         ld      hl,(TrackNumber)
-        ld      (workingTrack),hl         ; remember the starting track of the streak
+        ld      (workingTrack),hl               ; remember the starting track of the streak
         ld      a,(SectorNumber)
-        ld      (workingDeblockSector),a          ; remember the starting sector of the streak
-WS02: ld      a,(physicalSectorSkip)
+        ld      (workingDeblockSector),a        ; remember the starting sector of the streak
+WS02:   ld      a,(physicalSectorSkip)
         or      a
-        jp      z,WS04                ; no streak in progress - treat as a cache miss
+        jp      z,WS04                          ; no streak in progress - treat as a cache miss
         dec     a
         ld      (physicalSectorSkip),a          ; consume one step of the predicted streak
         ld      a,(DiskNumber)
         ld      hl,lastSeenDiskNumber
         cp      (hl)
-        jp      nz,WS04               ; different disk than the streak expects - cache miss
+        jp      nz,WS04                         ; different disk than the streak expects - cache miss
         ld      hl,workingTrack
-        call    CompareTrackNumber               ; compare TrackNumber to the streak's expected track
-        jp      nz,WS04               ; different track - cache miss
+        call    CompareTrackNumber              ; compare TrackNumber to the streak's expected track
+        jp      nz,WS04                         ; different track - cache miss
         ld      a,(SectorNumber)
         ld      hl,workingDeblockSector
         cp      (hl)
-        jp      nz,WS04               ; different sector than expected next - cache miss
-        inc     (hl)                    ; this is the predicted sector - advance the streak's expected sector
+        jp      nz,WS04                         ; different sector than expected next - cache miss
+        inc     (hl)                            ; this is the predicted sector - advance the streak's expected sector
         ld      a,(hl)
-        cp      028h                    ; rolled past the last sector (40) of the track?
+        cp      028h                            ; rolled past the last sector (40) of the track?
         jp      c,WS03
-        ld      (hl),000h               ; yes - wrap sector back to 0
+        ld      (hl),000h                       ; yes - wrap sector back to 0
         ld      hl,(workingTrack)
-        inc     hl                      ; and advance the streak's expected track
+        inc     hl                              ; and advance the streak's expected track
         ld      (workingTrack),hl
-WS03: xor     a
-        ld      (lastAccessMissedSectorCache),a          ; cache hit - no real disk access needed for this sector
+WS03:   xor     a
+        ld      (lastAccessMissed),a            ; cache hit - no real disk access needed for this sector
         jp      WS05
-WS04: xor     a
+WS04:   xor     a
         ld      (physicalSectorSkip),a          ; streak broken/absent - clear it
         inc     a
-        ld      (lastAccessMissedSectorCache),a          ; cache miss - a real disk access is needed
+        ld      (lastAccessMissed),a            ; cache miss - a real disk access is needed
 ;
 ; WS05 - shared tail of ReadSector and WriteSector.
 ;
@@ -809,7 +871,7 @@ WS04: xor     a
 ; a fresh load. After that, this checks whether the requested 128-byte
 ; sector falls within the currently cached 1K block:
 ;   - cache hit  -> skip straight to WS08 and use the buffer as-is
-;   - cache miss -> if the cached block is dirty (CurrentTrack<>0, see
+;   - cache miss -> if the cached block is dirty (sectorBufferDirty<>0, see
 ;                   the note on that equate above), flush it to disk
 ;                   first via ReadCachedSectorRetry(!) - NOTE: ReadCachedSectorRetry is the
 ;                   *read* retry routine, used here purely for its
@@ -821,7 +883,7 @@ WS04: xor     a
 ;                   physicalSectorSkip a read normally wouldn't.
 ;                   Then the new block's identity is recorded and, if
 ;                   this access also missed the disk-level cache flag
-;                   (lastAccessMissedSectorCache from the streak logic), the new 1K
+;                   (lastAccessMissed from the streak logic), the new 1K
 ;                   block is actually loaded in via WriteCachedSectorRetry (write
 ;                   retry routine - used here as "fill the buffer",
 ;                   which on reflection makes more sense terminology-
@@ -831,7 +893,7 @@ WS04: xor     a
 ; 1K cache buffer at the correct offset (SectorNumber & 3) within it,
 ; via the bank-switched UnbankMoveRebank helper (the destination might
 ; be in banked RAM that's normally switched out while the ROM is
-; active). A write also marks the cache dirty (CurrentTrack=1).
+; active). A write also marks the cache dirty (sectorBufferDirty=1).
 ;
 ; Finally, if this call's readWriteType (C value passed to WriteSector)
 ; was 1 (directory sector write), the cache is force-flushed
@@ -840,46 +902,46 @@ WS04: xor     a
 ; ensures it sees real, on-disk data.
 ;
 
-WS05: xor     a
-        ld      (ftcResultStatus),a          ; clear the saved FDC status byte
+WS05:   xor     a
+        ld      (ftcResultStatus),a             ; clear the saved FDC status byte
         ld      a,(SectorNumber)
         or      a
         rra
         or      a
-        rra                             ; A = SectorNumber >> 2 (which 1K block this CP/M sector lives in)
+        rra                                     ; A = SectorNumber >> 2 (which 1K block this CP/M sector lives in)
         ld      (workingSector),a
         ld      hl,headHomed
         ld      a,(hl)
-        ld      (hl),001h               ; mark "a cache identity now exists" for next time
+        ld      (hl),001h                       ; mark "a cache identity now exists" for next time
         or      a
-        jp      z,WS07                ; no valid cache identity yet - force a fresh load below
+        jp      z,WS07                          ; no valid cache identity yet - force a fresh load below
         ld      a,(DiskNumber)
         ld      hl,lastCachedDisk
         cp      (hl)
-        jp      nz,WS06               ; different disk than what's cached - cache miss
+        jp      nz,WS06                         ; different disk than what's cached - cache miss
         ld      hl,lastCachedTrack
-        call    CompareTrackNumber               ; compare TrackNumber to the cached track
-        jp      nz,WS06               ; different track - cache miss
+        call    CompareTrackNumber              ; compare TrackNumber to the cached track
+        jp      nz,WS06                         ; different track - cache miss
         ld      a,(workingSector)
         ld      hl,lastCachedSector
         cp      (hl)
-        jp      z,WS08                ; same 1K block - cache hit, use the buffer as-is
-WS06: ld      a,(CurrentTrack)        ; cache miss: is the currently cached block dirty?
+        jp      z,WS08                          ; same 1K block - cache hit, use the buffer as-is
+WS06:   ld      a,(sectorBufferDirty)           ; cache miss: is the currently cached block dirty?
         or      a
-        call    nz,ReadCachedSectorRetry            ; yes - flush it to disk first (see caution in the comment above)
-WS07: ld      a,(DiskNumber)
-        ld      (lastCachedDisk),a          ; record the new cache identity...
+        call    nz,ReadCachedSectorRetry        ; yes - flush it to disk first (see caution in the comment above)
+WS07:   ld      a,(DiskNumber)
+        ld      (lastCachedDisk),a              ; record the new cache identity...
         ld      hl,(TrackNumber)
         ld      (lastCachedTrack),hl
         ld      a,(workingSector)
         ld      (lastCachedSector),a
-        ld      a,(lastAccessMissedSectorCache)          ; ...and if this access wasn't already satisfied by the write-streak
-        or      a                       ; logic earlier (lastAccessMissedSectorCache<>0 means "really need real I/O"),
-        call    nz,WriteCachedSectorRetry            ; load the new 1K block from disk into the cache buffer
+        ld      a,(lastAccessMissed)            ; ...and if this access wasn't already satisfied by the write-streak
+        or      a                               ; logic earlier (lastAccessMissed<>0 means "really need real I/O"),
+        call    nz,WriteCachedSectorRetry       ; load the new 1K block from disk into the cache buffer
         xor     a
-        ld      (CurrentTrack),a        ; freshly loaded block is clean (not dirty)
-WS08: ld      a,(SectorNumber)
-        and     003h                    ; which of the 4 CP/M sectors within this 1K block?
+        ld      (sectorBufferDirty),a           ; freshly loaded block is clean (not dirty)
+WS08:   ld      a,(SectorNumber)
+        and     003h                            ; which of the 4 CP/M sectors within this 1K block?
         ld      l,a
         ld      h,000h
         add     hl,hl
@@ -888,27 +950,27 @@ WS08: ld      a,(SectorNumber)
         add     hl,hl
         add     hl,hl
         add     hl,hl
-        add     hl,hl                   ; HL = (SectorNumber & 3) * 128 - byte offset within the cache buffer
+        add     hl,hl                           ; HL = (SectorNumber & 3) * 128 - byte offset within the cache buffer
         ld      de,0fc16h
-        add     hl,de                   ; HL -> the right 128 bytes within the cache buffer
+        add     hl,de                           ; HL -> the right 128 bytes within the cache buffer
         ld      de,(DmaAddress)
         ld      bc,CpmSectorSize
         ld      a,(writeIfZero)
         or      a
-        jr      nz,WS09               ; this is a read - HL(cache)->DE(caller's DMA address), as-is
+        jr      nz,WS09                         ; this is a read - HL(cache)->DE(caller's DMA address), as-is
         ld      a,001h
-        ld      (CurrentTrack),a        ; this is a write - mark the cache dirty
-        ex      de,hl                   ; and swap so the copy goes DE(cache)<-HL... i.e. caller's DMA -> cache
-WS09: call    UnbankMoveRebank        ; switch to pure RAM banking, ldir the 128 bytes, switch back
+        ld      (sectorBufferDirty),a           ; this is a write - mark the cache dirty
+        ex      de,hl                           ; and swap so the copy goes DE(cache)<-HL... i.e. caller's DMA -> cache
+WS09:   call    UnbankMoveRebank                ; switch to pure RAM banking, ldir the 128 bytes, switch back
         ld      a,(readWriteType)
-        cp      001h                    ; was this a directory-sector write?
+        cp      001h                            ; was this a directory-sector write?
         ld      a,(ftcResultStatus)
-        ret     nz                      ; no - done; return the last FDC status byte
+        ret     nz                              ; no - done; return the last FDC status byte
         or      a
-        ret     nz                      ; the FDC load/flush above already failed - report that, don't mask it
+        ret     nz                              ; the FDC load/flush above already failed - report that, don't mask it
         xor     a
-        ld      (CurrentTrack),a        ; directory write succeeded - force an immediate flush rather than
-        call    ReadCachedSectorRetry               ; leaving it dirty, so CP/M's read-back sees real on-disk data
+        ld      (sectorBufferDirty),a           ; directory write succeeded - force an immediate flush rather than
+        call    ReadCachedSectorRetry           ; leaving it dirty, so CP/M's read-back sees real on-disk data
         ld      a,(ftcResultStatus)
         ret
 
@@ -937,24 +999,24 @@ CompareTrackNumber:
 ; selected drive's format (sides/density) the first time it's used.
 ;
 ; Entry: C = drive number. Returns HL = base address of that drive's
-; DPH-ish per-drive table slot (in DataBlock1) on success, or HL=0 if
+; DPH-ish per-drive table slot (in DiskParameterHeaders) on success, or HL=0 if
 ; the drive number (C) is out of range (>=4, this ROM only supports
 ; drives A-D).
 ;
 ; RAM layout referenced here (see equates near the top of the file):
-;   0fe17h          - current-track byte for whichever drive is now
-;                      selected (lives right after DriveToSelect; gets
+;   currentTrack     - current-track byte for whichever drive is now
+;                      selected (lives right after selectedDrive; gets
 ;                      copied to/from each drive's saved-format slot
 ;                      below, and is what actually gets OUT'd to the
 ;                      FDC's track register on a drive switch)
-;   driveAFormatParams/f/g/h - 3-byte saved format snapshot per drive (A/B/C/D):
+;   drivexFormatParams 3-byte saved format snapshot per drive (A/B/C/D):
 ;                      byte 0 = saved current-track, bytes 1-2 unused/
 ;                      reserved here. 0xff in byte 0 means "this drive
 ;                      has never been selected/probed yet".
-;   DataBlock1,
+;   DiskParameterHeaders,
 ;   0fe3bh, 0fe4ch,
-;   0fe5dh          - the 4 per-drive 17-byte DPH slots (A/B/C/D); see
-;                      DataBlock1InRom_start for their layout. Each
+;   0fe5dh           - the 4 per-drive 17-byte DPH slots (A/B/C/D); see
+;                      DiskParameterHeadersRom for their layout. Each
 ;                      slot's DPB pointer field always points at the
 ;                      single shared staging buffer at 0fe6eh.
 ;   0fe6eh           - shared 15-byte DPB staging area; whichever
@@ -962,12 +1024,12 @@ CompareTrackNumber:
 ;                      (SSDD/DSDD/DSQD) copied in here.
 ;
 
-SelectDiskAndDetectFormat: ld      hl,0
+SelectDiskAndDetectFormat:
+        ld      hl,0
         ld      a,c
         cp      004h
-        ret     nc                      ; drive number >= 4 -> invalid, return HL=0
-
-        ld      hl,DataBlock1           ; HL = this drive's per-drive DPH slot (by drive number 0-3)
+        ret     nc                              ; drive number >= 4 -> invalid, return HL=0
+        ld      hl,DiskParameterHeaders         ; HL = this drive's per-drive DPH slot (by drive number 0-3)
         cp      000h
         jr      z,SDF01
         ld      hl,0fe3bh
@@ -977,16 +1039,14 @@ SelectDiskAndDetectFormat: ld      hl,0
         cp      002h
         jr      z,SDF01
         ld      hl,0fe5dh
-SDF01: ld      a,(DriveToSelect)
-        ld      d,a                     ; D = previously selected drive number
+SDF01:  ld      a,(selectedDrive)
+        ld      d,a                             ; D = previously selected drive number
         cp      c
-        ret     z                       ; already selected - nothing to do, HL already has the right DPH slot
-
+        ret     z                               ; already selected - nothing to do, HL already has the right DPH slot
         ld      a,c
-        ld      (DriveToSelect),a       ; remember the newly selected drive
-        push    hl                      ; save this drive's DPH slot pointer (returned to caller below)
-
-        ld      hl,0fe17h               ; HL -> current-track byte of the about-to-be-deselected drive
+        ld      (selectedDrive),a               ; remember the newly selected drive
+        push    hl                              ; save this drive's DPH slot pointer (returned to caller below)
+        ld      hl,currentTrack                 ; HL -> current-track byte of the about-to-be-deselected drive
         ld      a,d
         cp      000h
         ld      de,driveAFormatParams
@@ -998,15 +1058,15 @@ SDF01: ld      a,(DriveToSelect)
         ld      de,driveCFormatParams
         jr      z,SDF02
         ld      de,driveDFormatParams
-SDF02: ld      a,(de)
+SDF02:  ld      a,(de)
         cp      0ffh
-        jr      z,SDF03                ; previous drive was never probed - nothing to save
+        jr      z,SDF03                         ; previous drive was never probed - nothing to save
         push    bc
-        ld      bc,00003h               ; 3 bytes
-        ldir                            ; save the outgoing drive's current-track/format snapshot
+        ld      bc,00003h                       ; 3 bytes
+        ldir                                    ; save the outgoing drive's current-track/format snapshot
         pop     bc
-        ld      de,0fe17h
-SDF03: ld      a,c
+        ld      de,currentTrack
+SDF03:  ld      a,c
         ld      hl,driveAFormatParams
         cp      000h
         jr      z,SDF04
@@ -1017,13 +1077,12 @@ SDF03: ld      a,c
         cp      002h
         jr      z,SDF04
         ld      hl,driveDFormatParams
-SDF04: ld      a,(hl)
+SDF04:  ld      a,(hl)
         cp      0ffh
-        jr      z,SDF06                ; new drive has never been probed - go auto-detect its format below
-
-        ld      bc,00003h               ; 3 bytes - restore the new drive's saved current-track/format snapshot
+        jr      z,SDF06                         ; new drive has never been probed - go auto-detect its format below
+        ld      bc,00003h                       ; 3 bytes - restore the new drive's saved current-track/format snapshot
         ldir
-        ld      bc,0000fh               ; 15 bytes - copy the right DPB into the shared staging buffer (0fe6eh)
+        ld      bc,0000fh                       ; 15 bytes - copy the right DPB into the shared staging buffer (0fe6eh)
         ld      de,0fe6eh
         ld      hl,SSDDDiskParameterBlock
         ld      a,(IsDoubleSided)
@@ -1034,10 +1093,10 @@ SDF04: ld      a,(hl)
         and     QuadDensityMask
         jr      z,SDF05
         ld      hl,DSQDDiskParameterBlock
-SDF05: ldir
-        ld      a,(0fe17h)
-        out     (FdcTrk),a              ; tell the FDC which track this drive was last known to be on
-        pop     hl                      ; HL = this drive's DPH slot (return value)
+SDF05:  ldir
+        ld      a,(currentTrack)
+        out     (FdcTrk),a                      ; tell the FDC which track this drive was last known to be on
+        pop     hl                              ; HL = this drive's DPH slot (return value)
         ret
 
 ;
@@ -1045,7 +1104,7 @@ SDF05: ldir
 ; out what's actually in the drive, then save the detected format.
 ;
 
-SDF06: pop     hl
+SDF06:  pop     hl
         call    SetDriveSelectOutput
         call    HomeHead
         push    hl
@@ -1053,56 +1112,56 @@ SDF06: pop     hl
         ld      de,0
         ld      (hl),e
         inc     hl
-        ld      (hl),d                  ; this drive's saved current-track snapshot = track 0 (just homed)
-        ld      de,00009h               ; +9 bytes
+        ld      (hl),d                          ; this drive's saved current-track snapshot = track 0 (just homed)
+        ld      de,00009h                       ; +9 bytes
         add     hl,de
         ld      de,0fe6eh
         ld      (hl),e
         inc     hl
-        ld      (hl),d                  ; this drive's DPB pointer field -> shared staging buffer (0fe6eh)
+        ld      (hl),d                          ; this drive's DPB pointer field -> shared staging buffer (0fe6eh)
         ld      a,000h
         ld      (densityFormatFlags),a          ; assume single density until proven otherwise
         in      a,(SysPioAData)
         or      sysPioSideSelectSetMask
-        out     (SysPioAData),a         ; select side 1 to probe for a second side
-        call    ReadNextAddress         ; try to read an address mark on side 1
+        out     (SysPioAData),a                 ; select side 1 to probe for a second side
+        call    ReadNextAddress                 ; try to read an address mark on side 1
         ld      hl,SSDDDiskParameterBlock
         ld      b,000h
-        jr      nz,SDF08               ; no address mark found on side 1 -> single-sided, stick with SSDD
+        jr      nz,SDF08                        ; no address mark found on side 1 -> single-sided, stick with SSDD
 
-        ld      a,(0ff82h)              ; sector-length byte returned by Read Address (see ReadNextAddress)
+        ld      a,(0ff82h)                      ; sector-length byte returned by Read Address (see ReadNextAddress)
         cp      00ah
         ld      b,000h
-        jr      c,SDF08                ; small sector length -> single density -> DSDD
+        jr      c,SDF08                         ; small sector length -> single density -> DSDD
         ld      hl,DSDDDiskParameterBlock
         cp      014h
-        jr      c,SDF07                ; medium sector length -> DSDD
+        jr      c,SDF07                         ; medium sector length -> DSDD
         ld      hl,DSQDDiskParameterBlock       ; large sector length -> quad density -> DSQD
         ld      a,QuadDensityMask
         ld      (densityFormatFlags),a
-SDF07: ld      b,0ffh                  ; got a real address mark on side 1 -> double-sided
-SDF08: ld      a,b
+SDF07:  ld      b,0ffh                          ; got a real address mark on side 1 -> double-sided
+SDF08:  ld      a,b
         ld      (IsDoubleSided),a
-        ld      bc,0000fh               ; 15 bytes - copy the detected DPB into the shared staging buffer
+        ld      bc,0000fh                       ; 15 bytes - copy the detected DPB into the shared staging buffer
         ld      de,0fe6eh
         ldir
         in      a,(SysPioAData)
         and     sysPioSideSelectClrMask
-        out     (SysPioAData),a         ; back to side 0
+        out     (SysPioAData),a                 ; back to side 0
         ld      c,002h
-        call    SeekToTrack               ; seek to track 2 to probe density (track 0/1 can be special-cased on some formats)
+        call    SeekToTrack                     ; seek to track 2 to probe density (track 0/1 can be special-cased on some formats)
         call    ReadNextAddress
-        ld      a,(0ff80h)              ; track number byte returned by Read Address
+        ld      a,(0ff80h)                      ; track number byte returned by Read Address
         ld      e,000h
         cp      002h
-        jr      z,SDF09                ; controller sees track 2 as track 2 -> normal density numbering
-        ld      e,010h                  ; controller's track count doesn't match -> quad density flag bit
-SDF09: ld      a,(densityFormatFlags)
+        jr      z,SDF09                         ; controller sees track 2 as track 2 -> normal density numbering
+        ld      e,010h                          ; controller's track count doesn't match -> quad density flag bit
+SDF09:  ld      a,(densityFormatFlags)
         or      e
         ld      (densityFormatFlags),a
-        ld      hl,0fe17h
+        ld      hl,currentTrack
         ld      de,driveAFormatParams
-        ld      a,(DriveToSelect)
+        ld      a,(selectedDrive)
         cp      000h
         jr      z,SDF10
         ld      de,driveBFormatParams
@@ -1112,8 +1171,8 @@ SDF09: ld      a,(densityFormatFlags)
         cp      002h
         jr      z,SDF10
         ld      de,driveDFormatParams
-SDF10: push    bc
-        ld      bc,00003h               ; 3 bytes - save this drive's now-detected current-track/format snapshot
+SDF10:  push    bc
+        ld      bc,00003h                       ; 3 bytes - save this drive's now-detected current-track/format snapshot
         ldir
         pop     bc
         pop     de
@@ -1135,17 +1194,17 @@ ReadNextAddress:
         push    hl
         push    bc
         ld      hl,0ff80h
-        ld      bc,00600h + FdcData     ; 6 bytes
-        ld      a,fdcReadAddress15ms    ; 0c4h - confirmed against the real ROM binary (offset 06b2h: 3e c4)
-                                        ; (original source had this as "FdcReadAddress15ms" - different
-                                        ; case from the equate's definition above; harmless under a
-                                        ; case-insensitive assembler, normalised here for consistency)
+        ld      bc,00600h + FdcData             ; 6 bytes
+        ld      a,fdcReadAddress15ms            ; 0c4h - confirmed against the real ROM binary (offset 06b2h: 3e c4)
+                                                ; (original source had this as "FdcReadAddress15ms" - different
+                                                ; case from the equate's definition above; harmless under a
+                                                ; case-insensitive assembler, normalised here for consistency)
         out     (FdcStCmd),a
-RNA01: halt                            ; wait for data available from FDC
-        ini                             ; get the data
+RNA01:  halt                                    ; wait for data available from FDC
+        ini                                     ; get the data
         jr      nz,RNA01
         call    WaitForFdcDone
-        bit     4,a                     ; FDC status bit 4 = Record Not Found
+        bit     4,a                             ; FDC status bit 4 = Record Not Found
         pop     bc
         pop     hl
         ret
@@ -1161,7 +1220,7 @@ RestoreDriveToTrack0: call    SetDriveSelectOutput
         and     sysPioSideSelectClrMask
         out     (SysPioAData),a
         xor     a
-        ld      (0fe17h),a              ; current-track byte for this drive is now 0
+        ld      (currentTrack),a                ; current-track byte for this drive is now 0
         ld      a,fdcRestore
         out     (FdcStCmd),a
         jp      WaitForFdcDone
@@ -1179,19 +1238,19 @@ SeekSelectSide:
         call    SetDriveSelectOutput
         in      a,(SysPioAData)
         and     sysPioSideSelectClrMask
-        out     (SysPioAData),a         ; default to side 0
+        out     (SysPioAData),a                 ; default to side 0
         ld      a,(IsDoubleSided)
         or      a
-        jr      z,SeekToTrack             ; single-sided - side 0 it is, go straight to the seek
+        jr      z,SeekToTrack                   ; single-sided - side 0 it is, go straight to the seek
         ld      a,c
-        rra                             ; shift the sector number's low bit into carry
+        rra                                     ; shift the sector number's low bit into carry
         ld      c,a
         in      a,(SysPioAData)
         jr      c,SSS01
-        and     sysPioSideSelectClrMask ; even physical sector -> side 0
+        and     sysPioSideSelectClrMask         ; even physical sector -> side 0
         jr      SSS02
-SSS01: or      sysPioSideSelectSetMask ; odd physical sector -> side 1
-SSS02: out     (SysPioAData),a
+SSS01:  or      sysPioSideSelectSetMask         ; odd physical sector -> side 1
+SSS02:  out     (SysPioAData),a
 
 ;
 ; SeekToTrack - seek the FDC to the physical sector's track number
@@ -1206,13 +1265,12 @@ SSS02: out     (SysPioAData),a
 
 SeekToTrack:
         ld      a,(densityFormatFlags)
-        and     010h                    ; quad-density flag bit
+        and     010h                            ; quad-density flag bit
         ld      a,c
         jr      z,STT01
-        add     a,c                     ; quad density - double the track number
-STT01:
-        ld      (0fe17h),a              ; remember this drive's new current track
-        out     (FdcData),a             ; FDC seek target track
+        add     a,c                             ; quad density - double the track number
+STT01:  ld      (currentTrack),a                ; remember this drive's new current track
+        out     (FdcData),a                     ; FDC seek target track
         ld      a,fdcSeek
         out     (FdcStCmd),a
         jr      WaitForFdcDone
@@ -1229,16 +1287,16 @@ STT01:
 
 SetFdcSectorRegister:
         in      a,(SysPioAData)
-        bit     2,a                     ; currently on side 1?
+        bit     2,a                             ; currently on side 1?
         ld      a,c
         jr      z,SFSR01
-        add     a,00ah                  ; side 1 -> offset sector number by 10
+        add     a,00ah                          ; side 1 -> offset sector number by 10
         ld      c,a
         ld      a,(densityFormatFlags)
         and     QuadDensityMask
         ld      a,c
         jr      z,SFSR01
-        add     a,00ah                  ; quad density too -> offset by another 10
+        add     a,00ah                          ; quad density too -> offset by another 10
 SFSR01: out     (FdcSec),a
         ret
 
@@ -1255,10 +1313,10 @@ SectorTranslate:
         or      e
         ld      h,b
         ld      l,c
-        ret     z                       ; DE=0 means "no translation" - just return HL=BC unchanged
+        ret     z                               ; DE=0 means "no translation" - just return HL=BC unchanged
         ex      de,hl
-        add     hl,bc                   ; HL = translation table base + logical sector number
-        ld      l,(hl)                  ; look up the physical sector number
+        add     hl,bc                           ; HL = translation table base + logical sector number
+        ld      l,(hl)                          ; look up the physical sector number
         ld      h,000h
         ret
 
@@ -1280,19 +1338,19 @@ SetDriveSelectOutput:
         ld      a,fdcForceInterrupt
         out     (FdcStCmd),a
         call    DiskOn
-        ld      a,(DriveToSelect)
-        ld      e,001h                  ; drive A -> select line 1
+        ld      a,(selectedDrive)
+        ld      e,001h                          ; drive A -> select line 1
         cp      000h
         jr      z,SDSO01
-        ld      e,002h                  ; drive B -> select line 2
+        ld      e,002h                          ; drive B -> select line 2
         cp      001h
         jr      z,SDSO01
-        ld      e,000h                  ; drive C -> select line 0
+        ld      e,000h                          ; drive C -> select line 0
         cp      002h
         jr      z,SDSO01
-        ld      e,003h                  ; drive D -> select line 3
+        ld      e,003h                          ; drive D -> select line 3
 SDSO01: in      a,(SysPioAData)
-        and     0dch                    ; clear the drive-select and side-select bits, keep everything else
+        and     0dch                            ; clear the drive-select and side-select bits, keep everything else
         or      e
         out     (SysPioAData),a
         pop     bc
@@ -1310,10 +1368,10 @@ SDSO01: in      a,(SysPioAData)
 DiskOn:
         in      a,(SysPioAData)
         bit     sysPioMotorOnBit,a
-        ret     z                       ; motor already on - nothing to do
+        ret     z                               ; motor already on - nothing to do
         res     sysPioMotorOnBit,a
         out     (SysPioAData),a
-        ld      b,032h                  ; ~50ms spin-up delay
+        ld      b,032h                          ; ~50ms spin-up delay
         call    DelayMS
         ret
 
@@ -1323,7 +1381,8 @@ DiskOn:
 ; Turns the drive motor off.
 ;
 
-DiskOff:in      a,(SysPioAData)
+DiskOff:
+        in      a,(SysPioAData)
         set     sysPioMotorOnBit,a
         out     (SysPioAData),a
         ret
@@ -1338,10 +1397,10 @@ DiskOff:in      a,(SysPioAData)
 
 DelayMS:
         ld      de,00686h
-DlyMS1: dec     de
+DMS1:   dec     de
         ld      a,d
         or      e
-        jp      nz,DlyMS1
+        jp      nz,DMS1
         djnz    DelayMS
         ret
 
@@ -1370,30 +1429,30 @@ WFFD01: in      a,(FdcStCmd)
 ;
 
 ReadCachedSectorRetry:
-        ld      l,003h                  ; L = recalibrate-and-retry cycles remaining
-RCSR01: ld      de,DI01                 ; NOTE: DI01 used here purely for its numeric address value (040fh),
-                                        ; not as a jump target - D=4 recalibrate cycles allowed total
-                                        ; (counts down on failure), E=0fh (15) retry count
+        ld      l,003h                          ; L = recalibrate-and-retry cycles remaining
+RCSR01: ld      de,DI01                         ; NOTE: DI01 used here purely for its numeric address value (040fh),
+                                                ; not as a jump target - D=4 recalibrate cycles allowed total
+                                                ; (counts down on failure), E=0fh (15) retry count
 RCSR02: push    hl
         push    de
-        call    ReselectCachedDriveTrackSector               ; (re)select drive/track/side/sector from the cache
-        call    FdcReadSectorTransfer               ; do the actual FDC read transfer
+        call    ReselectCachedDriveTrackSector  ; (re)select drive/track/side/sector from the cache
+        call    FdcReadSectorTransfer           ; do the actual FDC read transfer
         pop     de
         pop     hl
-        ret     z                       ; success
+        ret     z                               ; success
         dec     e
-        jr      nz,RCSR02               ; more retries left at this head position - try again
+        jr      nz,RCSR02                       ; more retries left at this head position - try again
         dec     d
-        jr      z,RCSR03                ; out of recalibrate cycles too - give up on this attempt
-        call    RestoreDriveToTrack0                  ; recalibrate (seek to track 0) and try again
-        ld      e,00fh                  ; 15 retries
+        jr      z,RCSR03                        ; out of recalibrate cycles too - give up on this attempt
+        call    RestoreDriveToTrack0            ; recalibrate (seek to track 0) and try again
+        ld      e,00fh                          ; 15 retries
         jr      RCSR02
 RCSR03:
-        ld      (ftcResultStatus),a          ; save the FDC's final status byte
+        ld      (ftcResultStatus),a             ; save the FDC's final status byte
         ret     z
         dec     l
-        jr      nz,RCSR01               ; more full cycles left - start over from scratch
-        ld      a,0ffh                  ; totally out of retries - report hard failure
+        jr      nz,RCSR01                       ; more full cycles left - start over from scratch
+        ld      a,0ffh                          ; totally out of retries - report hard failure
         jr      RCSR03
 
 ;
@@ -1406,20 +1465,19 @@ RCSR03:
 ;
 
 WriteCachedSectorRetry:
-        ld      de,DI01                 ; NOTE: DI01 used here purely for its numeric address value (040fh) -
-                                        ; D=4 recalibrate cycles allowed total, E=0fh (15) retry count
+        ld      de,0040fh                       ; D=4 recalibrate cycles allowed total, E=0fh (15) retry count
 WCSR01: push    de
         call    ReselectCachedDriveTrackSector  ; (re)select drive/track/side/sector from the cache
-        call    FdcWriteSectorTransfer  ; do the actual FDC write transfer
-        ld      (ftcResultStatus),a     ; save the FDC's final status byte
+        call    FdcWriteSectorTransfer          ; do the actual FDC write transfer
+        ld      (ftcResultStatus),a             ; save the FDC's final status byte
         pop     de
-        ret     z                       ; success
+        ret     z                               ; success
         dec     e
-        jr      nz,WCSR01               ; more retries left at this head position - try again
+        jr      nz,WCSR01                       ; more retries left at this head position - try again
         dec     d
-        ret     z                       ; out of recalibrate cycles too - give up (returns NZ -> caller sees failure)
-        call    RestoreDriveToTrack0    ; recalibrate (seek to track 0) and try again
-        ld      e,00fh                  ; 15 retries
+        ret     z                               ; out of recalibrate cycles too - give up (returns NZ -> caller sees failure)
+        call    RestoreDriveToTrack0            ; recalibrate (seek to track 0) and try again
+        ld      e,00fh                          ; 15 retries
         jr      WCSR01
 
 ;
@@ -1431,12 +1489,12 @@ WCSR01: push    de
 ReselectCachedDriveTrackSector:
         ld      a,(lastCachedDisk)
         ld      c,a
-        call    SelectDiskAndDetectFormat                  ; re-select the disk (also re-detects format if not yet probed)
+        call    SelectDiskAndDetectFormat       ; re-select the disk (also re-detects format if not yet probed)
         ld      bc,(lastCachedTrack)
-        call    SeekSelectSide               ; select the correct side and seek to the cached track
+        call    SeekSelectSide                  ; select the correct side and seek to the cached track
         ld      a,(lastCachedSector)
         ld      c,a
-        call    SetFdcSectorRegister               ; program the FDC sector register
+        call    SetFdcSectorRegister            ; program the FDC sector register
         ret
 
 ;
@@ -1449,9 +1507,9 @@ ReselectCachedDriveTrackSector:
 ;
 
 FdcWriteSectorTransfer:
-        ld      hl,0fc16h               ; 1K sector buffer to transfer from/to
-        ld      b,004h                  ; 4 quarter-track (256-byte) chunks = 1024 bytes total
-        ld      de,09c88h               ; E=88h: WD179x Read Sector command (m=0,S=0,E=1[15ms delay],C=0)
+        ld      hl,0fc16h                       ; 1K sector buffer to transfer from/to
+        ld      b,004h                          ; 4 quarter-track (256-byte) chunks = 1024 bytes total
+        ld      de,09c88h                       ; E=88h: WD179x Read Sector command (m=0,S=0,E=1[15ms delay],C=0)
         jr      FRST01
 
 ;
@@ -1460,71 +1518,65 @@ FdcWriteSectorTransfer:
 ;
 
 FdcReadSectorTransfer:
-        ld      hl,0fc16h               ; 1K sector buffer to transfer from/to
-        ld      b,004h                  ; 4 quarter-track (256-byte) chunks = 1024 bytes total
-        ld      de,0fcach               ; E=ach: WD179x Write Sector command
+        ld      hl,0fc16h                       ; 1K sector buffer to transfer from/to
+        ld      b,004h                          ; 4 quarter-track (256-byte) chunks = 1024 bytes total
+        ld      de,0fcach                       ; E=ach: WD179x Write Sector command
 FRST01: call    SetDriveSelectOutput
         di
-        ld      bc,00000h + FdcData     ; 256 bytes to transfer via floppy disk controller
-        ld      a,e                     ; A = the actual FDC command byte (read=88h / write=ach)
-        cp      0ach                    ; is this a write?
+        ld      bc,00000h + FdcData             ; 256 bytes to transfer via floppy disk controller
+        ld      a,e                             ; A = the actual FDC command byte (read=88h / write=ach)
+        cp      0ach                            ; is this a write?
         jr      z,FRST05
         push    af
         ld      a,(densityFormatFlags)
-        and     010h                    ; quad density?
+        and     010h                            ; quad density?
         jr      z,FRST02
         in      a,(FdcTrk)
-        srl     a                       ; quad density uses double track numbers internally - halve for the
-        out     (FdcTrk),a              ; duration of this 256-byte chunk's transfer, restored below
+        srl     a                               ; quad density uses double track numbers internally - halve for the
+        out     (FdcTrk),a                      ; duration of this 256-byte chunk's transfer, restored below
 FRST02: pop     af
-        out     (FdcStCmd),a            ; issue the Read Sector command
-FRST03: halt                            ; loop until we have read 256 bytes from the FDC
+        out     (FdcStCmd),a                    ; issue the Read Sector command
+FRST03: halt                                    ; loop until we have read 256 bytes from the FDC
         ini
         jr      nz,FRST03
-FRST04: halt                            ; loop until we have read 256 more bytes from the FDC
+FRST04: halt                                    ; loop until we have read 256 more bytes from the FDC
         ini
         jr      nz,FRST04
         jr      FRST09
 FRST05: push    af
         ld      a,(densityFormatFlags)
-        and     010h                    ; quad density?
+        and     010h                            ; quad density?
         jr      z,FRST06
         in      a,(FdcTrk)
-        srl     a                       ; halve the track number for this transfer, same reasoning as above
+        srl     a                               ; halve the track number for this transfer, same reasoning as above
         out     (FdcTrk),a
-FRST06:
-        pop     af
-        out     (FdcStCmd),a            ; issue the Write Sector command
-FRST07:
-        halt                            ; loop until we have fed the FDC 256 bytes of data
+FRST06: pop     af
+        out     (FdcStCmd),a                    ; issue the Write Sector command
+FRST07: halt                                    ; loop until we have fed the FDC 256 bytes of data
         outi
         jr      nz,FRST07
-FRST08:
-        halt                            ; loop until we have fed the FDC 256 more bytes of data
+FRST08: halt                                    ; loop until we have fed the FDC 256 more bytes of data
         outi
         jr      nz,FRST08
-FRST09:
-        ei
+FRST09: ei
         call    WaitForFdcDone
         push    af
         ld      a,(densityFormatFlags)
-        and     010h                    ; quad density?
+        and     010h                            ; quad density?
         jr      z,FRST10
         in      a,(FdcTrk)
-        add     a,a                     ; restore the doubled track number now that the transfer is done
+        add     a,a                             ; restore the doubled track number now that the transfer is done
         out     (FdcTrk),a
-FRST10:
-        push    de
-        ld      de,00200h               ; short settle delay (512 iterations) after the FDC command completes
-FRST11:
-        dec     de
+FRST10: push    de
+        ld      de,00200h                       ; short settle delay (512 iterations) after the FDC command completes
+FRST11: dec     de
         ld      a,d
         or      e
         jr      nz,FRST11
         pop     de
         pop     af
-        and     d                       ; D was the high byte of the read/write command pair (9ch/fch) -
-        ret     z                       ; nonzero bits here flag certain FDC status conditions as success/fail
+        and     d                               ; D was the high byte of the read/write command pair (9ch/fch) -
+        ret     z                               ; nonzero bits here flag certain FDC status conditions as success/fail
         ld      a,001h
         ret
 
@@ -1541,11 +1593,11 @@ FRST11:
 UnbankMoveRebankInRom:
         in      a,(SysPioAData)
         push    af
-        res     sysPioBankSelectBit,a   ; switch to pure-RAM banking (ROM no longer visible at 0000h)
+        res     sysPioBankSelectBit,a           ; switch to pure-RAM banking (ROM no longer visible at 0000h)
         out     (SysPioAData),a
-        ldir                            ; HL/DE/BC are set up by the caller (see ReadSector/WriteSector)
+        ldir                                    ; HL/DE/BC are set up by the caller (see ReadSector/WriteSector)
         pop     af
-        out     (SysPioAData),a         ; restore whatever banking mode was active before (puts ROM back)
+        out     (SysPioAData),a                 ; restore whatever banking mode was active before (puts ROM back)
         ret
 
 ;
@@ -1569,33 +1621,33 @@ UnbankMoveRebankInRom:
 ;
 
 DeviceInitTable_start:
-        defb 26                         ; 26 (port, value) pairs follow
-        defb KeySioCtl,   018h          ; keyboard SIO: channel reset
-        defb BaudB,       005h          ; keyboard SIO baud rate generator
-        defb KeySioCtl,   004h          ; keyboard SIO: select WR4
-        defb KeySioCtl,   044h          ; keyboard SIO: WR4 = x16 clock, 1 stop bit, no parity
-        defb KeySioCtl,   003h          ; keyboard SIO: select WR3
-        defb KeySioCtl,   0c1h          ; keyboard SIO: WR3 = 8 bits/char, receiver enable
-        defb KeySioCtl,   005h          ; keyboard SIO: select WR5
-        defb KeySioCtl,   0e8h          ; keyboard SIO: WR5 = 8 bits/char, transmitter enable, RTS
-        defb KeySioCtl,   001h          ; keyboard SIO: select WR1
-        defb KeySioCtl,   000h          ; keyboard SIO: WR1 = no interrupts/DMA
-        defb SerSioCtl,   018h          ; serial SIO: channel reset
-        defb BaudA,       005h          ; serial SIO baud rate generator
-        defb SerSioCtl,   004h          ; serial SIO: select WR4
-        defb SerSioCtl,   044h          ; serial SIO: WR4 = x16 clock, 1 stop bit, no parity
-        defb SerSioCtl,   003h          ; serial SIO: select WR3
-        defb SerSioCtl,   0e1h          ; serial SIO: WR3 = 8 bits/char, receiver enable
-        defb SerSioCtl,   005h          ; serial SIO: select WR5
-        defb SerSioCtl,   0e8h          ; serial SIO: WR5 = 8 bits/char, transmitter enable, RTS
-        defb SerSioCtl,   001h          ; serial SIO: select WR1
-        defb SerSioCtl,   000h          ; serial SIO: WR1 = no interrupts/DMA
-        defb SysPioACtl,  003h          ; system PIO port A: mode 3 (bit control) select
-        defb SysPioAData, 081h          ; system PIO port A: I/O direction bits (motor/bank bits = input/output mix)
-        defb SysPioACtl,  0cfh          ; system PIO port A: mode 3 direction mask continued
-        defb SysPioACtl,  008h          ; system PIO port A: interrupt control word (disabled)
-        defb PtrPioACtl,  003h          ; printer PIO port A: mode 3 (bit control) select
-        defb PtrPioACtl,  00fh          ; printer PIO port A: I/O direction bits
+        defb 26                                 ; 26 (port, value) pairs follow
+        defb KeySioCtl,   018h                  ; keyboard SIO: channel reset
+        defb BaudB,       005h                  ; keyboard SIO baud rate generator
+        defb KeySioCtl,   004h                  ; keyboard SIO: select WR4
+        defb KeySioCtl,   044h                  ; keyboard SIO: WR4 = x16 clock, 1 stop bit, no parity
+        defb KeySioCtl,   003h                  ; keyboard SIO: select WR3
+        defb KeySioCtl,   0c1h                  ; keyboard SIO: WR3 = 8 bits/char, receiver enable
+        defb KeySioCtl,   005h                  ; keyboard SIO: select WR5
+        defb KeySioCtl,   0e8h                  ; keyboard SIO: WR5 = 8 bits/char, transmitter enable, RTS
+        defb KeySioCtl,   001h                  ; keyboard SIO: select WR1
+        defb KeySioCtl,   000h                  ; keyboard SIO: WR1 = no interrupts/DMA
+        defb SerSioCtl,   018h                  ; serial SIO: channel reset
+        defb BaudA,       005h                  ; serial SIO baud rate generator
+        defb SerSioCtl,   004h                  ; serial SIO: select WR4
+        defb SerSioCtl,   044h                  ; serial SIO: WR4 = x16 clock, 1 stop bit, no parity
+        defb SerSioCtl,   003h                  ; serial SIO: select WR3
+        defb SerSioCtl,   0e1h                  ; serial SIO: WR3 = 8 bits/char, receiver enable
+        defb SerSioCtl,   005h                  ; serial SIO: select WR5
+        defb SerSioCtl,   0e8h                  ; serial SIO: WR5 = 8 bits/char, transmitter enable, RTS
+        defb SerSioCtl,   001h                  ; serial SIO: select WR1
+        defb SerSioCtl,   000h                  ; serial SIO: WR1 = no interrupts/DMA
+        defb SysPioACtl,  003h                  ; system PIO port A: mode 3 (bit control) select
+        defb SysPioAData, 081h                  ; system PIO port A: I/O direction bits (motor/bank bits = input/output mix)
+        defb SysPioACtl,  0cfh                  ; system PIO port A: mode 3 direction mask continued
+        defb SysPioACtl,  008h                  ; system PIO port A: interrupt control word (disabled)
+        defb PtrPioACtl,  003h                  ; printer PIO port A: mode 3 (bit control) select
+        defb PtrPioACtl,  00fh                  ; printer PIO port A: I/O direction bits
 
 ;
 ; DeviceInit function
@@ -1605,11 +1657,11 @@ DeviceInitTable_start:
 
 DeviceInit:
         ld      hl,DeviceInitTable_start
-        ld      b,(hl)                  ; B = number of (port, value) pairs
+        ld      b,(hl)                          ; B = number of (port, value) pairs
 DevIn1: inc     hl
-        ld      c,(hl)                  ; C = port address
+        ld      c,(hl)                          ; C = port address
         inc     hl
-        ld      a,(hl)                  ; A = value to send
+        ld      a,(hl)                          ; A = value to send
         out     (c),a
         djnz    DevIn1
         ret
@@ -1684,19 +1736,18 @@ CheckKeyboardAndBuffer:
 
 StartConfigSequence:
         ld      hl,(DisplayCursorPosition)
-        push    hl                      ; saved for the final cursor-position restore at the very end
+        push    hl                              ; saved for the final cursor-position restore at the very end
         ld      c,cr
         call    DisplayOut
         call    DisplayPutChar
         ld      hl,(DisplayCursorPosition)
-        ld      de,0bbf0h               ; scratch save area for the screen content under the menu prompts
-        ld      bc,00009h+1             ; 10 bytes
-        push    hl                      ; saved dest pointer (cursor position) for the final restore ldir
-        push    de                      ; saved source pointer (0bbf0h) for the final restore ldir
-        push    bc                      ; saved byte count for the final restore ldir
-        ldir                            ; save the screen content under where the prompts are about to go
-
-        call    Immediate               ; print the cursor message
+        ld      de,0bbf0h                       ; scratch save area for the screen content under the menu prompts
+        ld      bc,00009h+1                     ; 10 bytes
+        push    hl                              ; saved dest pointer (cursor position) for the final restore ldir
+        push    de                              ; saved source pointer (0bbf0h) for the final restore ldir
+        push    bc                              ; saved byte count for the final restore ldir
+        ldir                                    ; save the screen content under where the prompts are about to go
+        call    Immediate                       ; print the cursor message
 
 ;
 ; Cursor message
@@ -1704,7 +1755,7 @@ StartConfigSequence:
 
         defb    cr, '          '
         defb    cr, 'CURSOR?'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; Config continues here
@@ -1719,8 +1770,7 @@ StartConfigSequence:
 ConfigSetCursorCharacter:
         ld c,a
         push bc
-
-        call Immediate                  ; print the blinking message
+        call Immediate                          ; print the blinking message
 
 ;
 ; Blinking message
@@ -1728,7 +1778,7 @@ ConfigSetCursorCharacter:
 
         defb    cr, '          '
         defb    cr, 'BLINK?'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; config continues here
@@ -1745,8 +1795,7 @@ ConfigSetCursorAndBlinkOn:
 ConfigSetCursorAndBlinkOff:
         ld      (CursorCharAndBlinkEnable),a
 ConfigSkipCursorConfig:
-
-        call    Immediate               ; print the dumpchr message
+        call    Immediate                       ; print the dumpchr message
 
 ;
 ; DumpChr message
@@ -1754,7 +1803,7 @@ ConfigSkipCursorConfig:
 
         defb    cr, '          '
         defb    cr, 'DUMP CHR?'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; config continues here
@@ -1776,7 +1825,7 @@ ConfigSkipDumpCharacter:
 
         defb    cr, '          '
         defb    cr, 'TTY DUMP? '
-        defb    tab, tab, 0
+        defb    backspace, backspace, 0
 
 ;
 ; config continues here
@@ -1796,7 +1845,6 @@ ConfigSetTTYDumpOn:
 ConfigSetTTYDumpOff:
         ld      (TTYDumpEnable),a
 ConfigSkipTTYDump:
-
         call    Immediate                       ; print prt:=crt: message
 
 ;
@@ -1805,7 +1853,7 @@ ConfigSkipTTYDump:
 
         defb    cr, '          '
         defb    cr, 'PRT:=CRT:?'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; config continues here
@@ -1825,7 +1873,6 @@ ConfigSetDisplayEchoOn:
 ConfigSetDisplayEchoOff:
         ld      (DisplayEchoEnable),a
 ConfigSkipDisplayEcho:
-
         call    Immediate                       ; print the keyclick message
 
 ;
@@ -1834,7 +1881,7 @@ ConfigSkipDisplayEcho:
 
         defb    cr, '          '
         defb    cr, 'KEYCLICK? '
-        defb    tab, tab, 0
+        defb    backspace, backspace, 0
 
 ;
 ; config continues here
@@ -1859,7 +1906,6 @@ ConfigSetKeyClickOn:
 ConfigSetKeyClickOff:
         ld      (KeyClickEnable),a
 ConfigSkipKeyClick:
-
         call    Immediate                       ; print buffer on message
 
 ;
@@ -1868,7 +1914,7 @@ ConfigSkipKeyClick:
 
         defb    cr, '          '
         defb    cr, 'BUFFER ON?'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; config continues here
@@ -1896,7 +1942,6 @@ ConfigSetBufferOff:
 ;
 
 ConfigDoneSave:
-
         call    Immediate                       ; print save message
 
 ;
@@ -1905,7 +1950,7 @@ ConfigDoneSave:
 
         defb    cr, '          '
         defb    cr, 'SAVE?'
-        defb    tab, 0
+        defb    backspace, 0
 
 ;
 ; config continues here
@@ -1923,7 +1968,7 @@ ConfigDoneSave:
         ld      hl,0ff80h
         ld      (DmaAddress),hl         ; stage the write at 0ff80h, which holds the existing boot-sector
         call    ReadSector              ; image (load/start/sector-count) - read it back in first so the
-                                         ; save doesn't clobber that part of the sector
+                                        ; save doesn't clobber that part of the sector
         ld      a,(CursorCharAndBlinkEnable)
         ld      (0ff8ch),a              ; -> SavedCursorCharAndBlinkEnable (0fa0ch) on the next boot
         ld      a,(DumpCharacter)
@@ -1939,6 +1984,7 @@ ConfigDoneSave:
         pop     hl
         ld      (DmaAddress),hl         ; restore the real DMA address
         call    DiskOff
+
 ConfigSkipSave:
         pop     bc                      ; restore the saved byte count from StartConfigSequence
         pop     hl                      ; restore the saved dest pointer (original cursor position)
@@ -1975,16 +2021,16 @@ GetAKeyFromBufferFunction:
         ld      (BufferContentCount),a
         ld      c,a                     ; BC = number of bytes remaining after this pop
         ld      b,000h
-        ld      hl,Buffer
+        ld      hl,typeAheadBuffer
         ld      a,(hl)                  ; A = the byte being popped (Buffer[0])
         inc     hl
-        ld      de,Buffer
+        ld      de,typeAheadBuffer
         push    af
         ld      a,b
         or      c
-        jr      z,GKB01                ; buffer is now empty - nothing to shift down
+        jr      z,GKB01                 ; buffer is now empty - nothing to shift down
         ldir                            ; shift Buffer[1..] down to Buffer[0..]
-GKB01: pop     af
+GKB01:  pop     af
         ret
 
 ;
@@ -2012,10 +2058,10 @@ KeyboardInFromBuffer:
         ld      (BufferContentCount),a
         ld      c,a
         ld      b,000h
-        ld      hl,Buffer
+        ld      hl,typeAheadBuffer
         ld      a,(hl)
         inc     hl
-        ld      de,Buffer
+        ld      de,typeAheadBuffer
         push    af
         ld      a,b
         or      c
@@ -2024,22 +2070,26 @@ KeyboardInFromBuffer:
 
 KeyboardBufferIsEmptyNow:
         pop     af
+
 KeyboardCheckForSpecialKey:
         cp      01fh                    ; ctrl-_ (031fh) - the setup-menu hotkey?
         jp      z,StartConfigSequence
         ld      hl,DumpCharacter
         cp      (hl)                    ; is this the user's configured "dump screen to printer" key?
         push    af
-        call    TranslateNumpadKey               ; also run it through the numeric-keypad translation table
+        call    TranslateNumpadKey      ; also run it through the numeric-keypad translation table
         ld      c,a
         pop     af
         ld      a,c
         ret     nz                      ; not the dump-screen hotkey - return the (possibly pad-translated) key
         ld      hl,DisplayBuffer
+
 DisplayDumpToPrinter:
         ld      e,018h                  ; 24 lines to dump
+
 DisplayDumpToPrinterLineLoop:
         ld      d,050h                  ; 80 columns per line
+
 DisplayDumpToPrinterCharLoop:
         ld      a,(hl)
         ld      c,a
@@ -2266,56 +2316,54 @@ DisplayOut:
         push    bc
         ld      a,(DisplayEchoEnable)
         or      a
-        jr      z,DO01
+        jr      z,DO00
         call    DisplayPrinterOutput
-DO01:
+DO00:
         pop     bc
         ld      a,(DisplayEscapeState)
         or      a
         jp      nz,DisplayContinueEscape        ; mid-escape-sequence - the rest of DisplayOut doesn't apply
-        ld      a,007h
+        ld      a,bell
         cp      c
-        jr      nz,DNotBel
-        ld      c,004h                  ; BEL -> tell the keyboard controller to beep (command 004h)
+        jr      nz,DO01                         ; not a bell
+        ld      c,004h                          ; BEL -> tell the keyboard controller to beep (command 004h)
         jp      KeyboardOut
-DNotBel:call    DisplayPutChar          ; turn off any cursor-blink marker at the old cursor position first
+DO01:   call    DisplayPutChar                  ; turn off any cursor-blink marker at the old cursor position first
         ld      de,DisplayCheckCursorBlink      ; most paths below fall through to here to set the new cursor marker
         push    de
         ld      a,c
-        cp      00ah
+        cp      lf
         jr      z,DisplayCursorDown
-        cp      00dh
+        cp      cr
         jp      z,DisplayCarageReturn
-        cp      008h
+        cp      backspace
         jr      z,DisplayCursorLeft
-        cp      00ch
+        cp      ff
         jr      z,DisplayCursorRight
-        cp      00bh
+        cp      vt
         jr      z,DisplayCursorUp
         cp      escape
         jp      z,DisplayStartEscape
-        cp      018h
+        cp      can
         jp      z,DisplayClearToEndOfLine
-        cp      017h
+        cp      etb
         jr      z,DisplayClearToEndOfScreen
-        cp      sub                     ; NOTE: source had "Sub" (undefined symbol) here; this should reference
-        jr      z,DisplayClear          ; the "sub" equate (01ah, ASCII SUB) defined near the top of the file -
-                                         ; corrected here, as every other special-character comparison in this
-                                         ; ROM uses the lowercase equates (cr/lf/escape/tab/bell) consistently.
-        cp      01eh
+        cp      sub                             ; NOTE: source had "Sub" (undefined symbol) here; this should reference
+        jr      z,DisplayClear
+        cp      rs
         jr      z,DisplayHomeTheCursor
         cp      060h
-        jr      c,DO02                ; below 060h - apply the alphabet mask (ASCII/Greek) below
+        jr      c,DO02                          ; below 060h - apply the alphabet mask (ASCII/Greek) below
         ld      a,(DisplayAlphabetSelect)
         and     c
-DO02: ld      (hl),a                  ; store the character into the display buffer at the cursor
+DO02:   ld      (hl),a                          ; store the character into the display buffer at the cursor
         inc     hl
         ld      a,l
         and     07fh
-        cp      050h                    ; reached column 80 (the end of the visible part of the line)?
+        cp      050h                            ; reached column 80 (the end of the visible part of the line)?
         ret     c
         call    DisplayCarageReturn
-        jr      DisplayCursorDown       ; wrap to the start of the next line (scrolling if needed)
+        jr      DisplayCursorDown               ; wrap to the start of the next line (scrolling if needed)
 
 ;
 ; DO03 - shared "did the cursor just move past the bottom of the
@@ -2324,7 +2372,7 @@ DO02: ld      (hl),a                  ; store the character into the display buf
 ; scrolled) cursor position either way.
 ;
 
-DO03: ld      de,DisplayBufferEnd
+DO03:   ld      de,DisplayBufferEnd
         ld      a,d
         cp      h
         jr      c,DisplayScrollUp
@@ -2341,20 +2389,20 @@ DO03: ld      de,DisplayBufferEnd
 ;
 
 DisplayScrollUp:
-        ld      b,017h                  ; 23 lines to move
+        ld      b,017h                          ; 23 lines to move
         ld      hl,DisplayBufferOneLineIn
         ld      de,DisplayBuffer
 Dsuplp: push    bc
-        ld      bc,DisplayLineSizeVisablePortion       ; move the 80 visible columns of this line
+        ld      bc,DisplayLineSizeVisablePortion ; move the 80 visible columns of this line
         ldir
-        ld      bc,DisplayLineSizeHiddenPortion        ; then skip the 48 hidden/offscreen bytes on both
-        add     hl,bc                                  ; the source and destination side, since they don't
-        ex      de,hl                                  ; need to be moved
+        ld      bc,DisplayLineSizeHiddenPortion ; then skip the 48 hidden/offscreen bytes on both
+        add     hl,bc                           ; the source and destination side, since they don't
+        ex      de,hl                           ; need to be moved
         add     hl,bc
         ex      de,hl
         pop     bc
         djnz    Dsuplp
-        ld      hl,DisplayBufferEndOneLineBefore        ; HL -> start of the now-blank last line
+        ld      hl,DisplayBufferEndOneLineBefore ; HL -> start of the now-blank last line
         jr      DisplayClearToEndOfLine
 
 ;
@@ -2399,16 +2447,16 @@ DisplayCursorRight:
 
 DisplayCursorUp:
         push    hl
-        ld      de,0ff80h               ; -DisplayLineSize, i.e. subtract one line's worth of bytes
+        ld      de,0ff80h                       ; -DisplayLineSize, i.e. subtract one line's worth of bytes
         add     hl,de
         push    hl
         or      a
         ld      de,DisplayBuffer
-        sbc     hl,de                   ; would this move above the top of the buffer?
+        sbc     hl,de                           ; would this move above the top of the buffer?
         pop     hl
         pop     de
-        ret     nc                      ; yes - already on line 0, leave the cursor where it was (in DE... )
-        ex      de,hl                   ; ...no - HL = the moved-up position is the new cursor position
+        ret     nc                              ; yes - already on line 0, leave the cursor where it was (in DE... )
+        ex      de,hl                           ; ...no - HL = the moved-up position is the new cursor position
         ret
 
 ;
@@ -2421,9 +2469,9 @@ DisplayClear:
         ld      de,DisplayBufferOnCharIn
         ld      bc,DisplayBufferSizeOneLess     ; 0bffh - fills the buffer via a 1-byte seed + overlapping
         ld      (hl),020h                       ; ldir copy (each copied byte becomes the source for the
-        ldir                                     ; next, so the whole buffer ends up full of spaces).
-        ld      hl,DisplayBuffer                 ; This constant's value was confirmed directly against a
-        ret                                      ; real ROM dump - see the DisplayBufferSizeOneLess equate.
+        ldir                                    ; next, so the whole buffer ends up full of spaces).
+        ld      hl,DisplayBuffer                ; This constant's value was confirmed directly against a
+        ret                                     ; real ROM dump - see the DisplayBufferSizeOneLess equate.
 
 ;
 ; DisplayHomeTheCursor function - move the cursor to the top-left.
@@ -2444,24 +2492,24 @@ DisplayClearToEndOfScreen:
         call    DisplayClearToEndOfLine
         ld      de,DisplayLineSize
         ld      a,l
-        and     080h                    ; keep only the high bit of the column (forces column to 0 or 80)
+        and     080h                            ; keep only the high bit of the column (forces column to 0 or 80)
         ld      l,a
-        add     hl,de                   ; HL -> start of the next line
+        add     hl,de                           ; HL -> start of the next line
         ld      a,03ch
         cp      h
-        jr      z,DCTEOS01                ; already past the last line - nothing more to clear
+        jr      z,DCTEOS01                      ; already past the last line - nothing more to clear
         ld      e,l
         ld      d,h
         or      a
         ld      hl,DisplayBufferEnd
-        sbc     hl,de                   ; HL = number of bytes from here to the end of the buffer
+        sbc     hl,de                           ; HL = number of bytes from here to the end of the buffer
         ld      c,l
         ld      b,h
         ld      h,d
         ld      l,e
         inc     de
         ld      (hl),020h
-        ldir                            ; fill the rest of the buffer with spaces
+        ldir                                    ; fill the rest of the buffer with spaces
 DCTEOS01: pop     hl
         ret
 
@@ -2474,20 +2522,20 @@ DisplayClearToEndOfLine:
         ld      a,l
         and     07fh
         cp      04fh
-        jr      c,DCTEOL01
-        ld      (hl),020h               ; already at/past the last column - just clear this one byte
+        jr      c,DCTEL01
+        ld      (hl),020h                       ; already at/past the last column - just clear this one byte
         ret
-DCTEOL01: push    hl
+DCTEL01:push    hl
         push    hl
         ld      a,l
-        and     080h                    ; keep only the high bit of the column (start-of-line marker)
+        and     080h                            ; keep only the high bit of the column (start-of-line marker)
         ld      l,a
-        ld      de,0004fh               ; +79: end-of-line column offset
-        add     hl,de                   ; HL -> last column of this line
+        ld      de,0004fh                       ; +79: end-of-line column offset
+        add     hl,de                           ; HL -> last column of this line
         pop     de
         push    de
         or      a
-        sbc     hl,de                   ; HL = number of columns remaining to the end of the line
+        sbc     hl,de                           ; HL = number of columns remaining to the end of the line
         ld      c,l
         ld      b,h
         pop     hl
@@ -2495,7 +2543,7 @@ DCTEOL01: push    hl
         ld      d,h
         inc     de
         ld      (hl),020h
-        ldir                            ; fill the rest of the line with spaces
+        ldir                                    ; fill the rest of the line with spaces
         pop     hl
         ret
 
@@ -2510,12 +2558,12 @@ DisplayPutChar:
         ld      a,(hl)
         push    hl
         ld      hl,CursorCharAndBlinkEnable
-        cp      (hl)                    ; does the byte at the cursor match the configured cursor character?
+        cp      (hl)                            ; does the byte at the cursor match the configured cursor character?
         pop     hl
         ld      a,020h
         jr      nz,DPC01
-        ld      (hl),a                  ; it does - that was just the cursor marker, replace it with a space
-DPC01: res     7,(hl)                  ; clear the high (cursor/attribute) bit either way
+        ld      (hl),a                          ; it does - that was just the cursor marker, replace it with a space
+DPC01: res     7,(hl)                           ; clear the high (cursor/attribute) bit either way
         ret
 
 ;
@@ -2525,7 +2573,7 @@ DPC01: res     7,(hl)                  ; clear the high (cursor/attribute) bit e
 
 DisplayCarageReturn:
         ld      a,l
-        and     080h                    ; keep only the high bit (which line we're on)
+        and     080h                            ; keep only the high bit (which line we're on)
         ld      l,a
         ret
 
@@ -2570,53 +2618,53 @@ DisplayStartEscape:
 ;
 
 DisplayContinueEscape:
-        ld      hl,DCCB03               ; default return address: just clean up and return (escape sequence done)
+        ld      hl,DCCB03                       ; default return address: just clean up and return (escape sequence done)
         push    hl
         ld      hl,DisplayEscapeState
-        ld      (hl),000h               ; assume this completes the sequence unless a state below says otherwise
+        ld      (hl),000h                       ; assume this completes the sequence unless a state below says otherwise
         cp      001h
         jr      nz,DCE01
         ld      a,c
-        res     7,a                     ; strip the high bit (in case it was sent set)
-        cp      047h                    ; 'G'
+        res     7,a                             ; strip the high bit (in case it was sent set)
+        cp      'G'                             ; 'G'
         jr      z,DisplaySetGreek
-        cp      041h                    ; 'A'
+        cp      'A'                             ; 'A'
         jr      z,DisplaySetAscii
-        cp      052h                    ; 'R'
+        cp      'R'                             ; 'R'
         jr      z,DisplayDeleteLine
-        cp      045h                    ; 'E'
+        cp      'E'                             ; 'E'
         jr      z,DisplayInsertLine
-        cp      03dh                    ; '='
-        ret     nz                      ; unrecognised escape command - abandon the sequence (state already cleared)
+        cp      '='                             ; '='
+        ret     nz                              ; unrecognised escape command - abandon the sequence (state already cleared)
 
 DisplayStartMoveCursor:
-        ld      (hl),002h               ; ESC = seen - advance to state 2 (waiting for the row byte)
+        ld      (hl),002h                       ; ESC = seen - advance to state 2 (waiting for the row byte)
         ret
-DCE01: cp      002h
+DCE01:  cp      002h
         jr      nz,DCE02
         ld      a,c
-        ld      (DisplayUnknown),a      ; stash the row byte (still biased by +020h)
-        ld      (hl),003h               ; advance to state 3 (waiting for the column byte)
+        ld      (DisplayUnknown),a              ; stash the row byte (still biased by +020h)
+        ld      (hl),003h                       ; advance to state 3 (waiting for the column byte)
         ret
-DCE02: cp      003h
-        ret     nz                      ; (shouldn't happen - state is always 0/1/2/3)
-        call    DisplayPutChar          ; clear the cursor-blink marker at the old position first
-        pop hl                          ; discard the default return address pushed above (we jump there manually)
+DCE02:  cp      003h
+        ret     nz                              ; (shouldn't happen - state is always 0/1/2/3)
+        call    DisplayPutChar                  ; clear the cursor-blink marker at the old position first
+        pop hl                                  ; discard the default return address pushed above (we jump there manually)
         ld      hl,DisplayBuffer
-        ld      a,c                     ; A = the column byte (biased by +020h)
-        sub     020h                    ; remove the bias
-DCE03: sub     050h                    ; reduce modulo 80 (the visible line width) by repeated subtraction
+        ld      a,c                             ; A = the column byte (biased by +020h)
+        sub     020h                            ; remove the bias
+DCE03:  sub     050h                            ; reduce modulo 80 (the visible line width) by repeated subtraction
         jr      nc,DCE03
         add     a,050h
-        ld      l,a                     ; L = target column (0-79)
-        ld      a,(DisplayUnknown)      ; A = the stashed row byte (biased by +020h)
-        sub     020h                    ; remove the bias
-DCE04: sub     018h                    ; reduce modulo 24 (the number of screen rows) by repeated subtraction
+        ld      l,a                             ; L = target column (0-79)
+        ld      a,(DisplayUnknown)              ; A = the stashed row byte (biased by +020h)
+        sub     020h                            ; remove the bias
+DCE04:  sub     018h                            ; reduce modulo 24 (the number of screen rows) by repeated subtraction
         jr      nc,DCE04
-        add     a,018h                  ; A = target row (0-23)
+        add     a,018h                          ; A = target row (0-23)
         ld      de,DisplayLineSize
-DCE05: jp      z,DisplayCheckCursorBlink       ; row countdown reached 0 - HL now points at the target position
-        add     hl,de                   ; otherwise advance one more line and keep counting down
+DCE05:  jp      z,DisplayCheckCursorBlink       ; row countdown reached 0 - HL now points at the target position
+        add     hl,de                           ; otherwise advance one more line and keep counting down
         dec     a
         jr      DCE05
 
@@ -2667,13 +2715,13 @@ DisplaySetAscii:
 ;
 
 DisplayDeleteLine:
-        pop     hl                      ; discard the default return address (we jump to DisplayCheckCursorBlink ourselves)
-        call    ComputeLineShiftRange               ; compute how many lines need to move up, and the source/dest pointers
+        pop     hl                              ; discard the default return address (we jump to DisplayCheckCursorBlink ourselves)
+        call    ComputeLineShiftRange           ; compute how many lines need to move up, and the source/dest pointers
         push    de
-        jr      z,DDL01                ; already on the last line - nothing to move, just clear it
-        ldir                            ; move every line below the cursor up by one line
+        jr      z,DDL01                         ; already on the last line - nothing to move, just clear it
+        ldir                                    ; move every line below the cursor up by one line
 DDL01: ld      hl,DisplayBufferEndOneLineBefore
-        call    DisplayClearToEndOfLine        ; clear the now-vacated last line
+        call    DisplayClearToEndOfLine         ; clear the now-vacated last line
         pop     hl
         jr      DisplayCheckCursorBlink
 
@@ -2685,16 +2733,16 @@ DDL01: ld      hl,DisplayBufferEndOneLineBefore
 ;
 
 DisplayInsertLine:
-        pop     hl                      ; discard the default return address
-        call    ComputeLineShiftRange               ; compute how many lines need to move down, and the source/dest pointers
+        pop     hl                              ; discard the default return address
+        call    ComputeLineShiftRange           ; compute how many lines need to move down, and the source/dest pointers
         push    de
-        jr      z,DIL01                ; already on the last line - nothing to move, just clear it
+        jr      z,DIL01                         ; already on the last line - nothing to move, just clear it
         ld      de,DisplayBufferEnd
-        ld      hl,03b7fh               ; last byte of the second-to-last line (source for the downward copy)
-        lddr                            ; move the cursor's line and everything below it down by one line (in reverse)
+        ld      hl,03b7fh                       ; last byte of the second-to-last line (source for the downward copy)
+        lddr                                    ; move the cursor's line and everything below it down by one line (in reverse)
 DIL01: pop     hl
         push    hl
-        call    DisplayClearToEndOfLine        ; clear the line at the cursor (now blank)
+        call    DisplayClearToEndOfLine         ; clear the line at the cursor (now blank)
         pop     hl
         jr      DisplayCheckCursorBlink
 
@@ -2708,20 +2756,20 @@ DIL01: pop     hl
 ;
 
 ComputeLineShiftRange:
-        call    DisplayPutChar          ; clear the cursor-blink marker first
-        call    DisplayCarageReturn     ; HL -> start of the cursor's current line
+        call    DisplayPutChar                  ; clear the cursor-blink marker first
+        call    DisplayCarageReturn             ; HL -> start of the cursor's current line
         push    hl
         ex      de,hl
-        ld      hl,DisplayBufferEndOneLineBefore       ; start of the last line on screen
+        ld      hl,DisplayBufferEndOneLineBefore ; start of the last line on screen
         or      a
-        sbc     hl,de                   ; HL = byte offset from the cursor's line to the last line
+        sbc     hl,de                           ; HL = byte offset from the cursor's line to the last line
         ld      b,h
-        ld      c,l                     ; BC = that offset (0 if the cursor is already on the last line)
+        ld      c,l                             ; BC = that offset (0 if the cursor is already on the last line)
         pop     hl
         push    hl
         ld      de,DisplayLineSize
-        add     hl,de                   ; HL -> start of the line after the cursor's line
-        pop     de                      ; DE -> start of the cursor's own line
+        add     hl,de                           ; HL -> start of the line after the cursor's line
+        pop     de                              ; DE -> start of the cursor's own line
         ld      a,b
         or      c
         ret
@@ -2733,15 +2781,15 @@ ComputeLineShiftRange:
 ;
 
 Immediate:
-        ex      (sp),hl                 ; HL -> the byte right after the call to Immediate (the string)
+        ex      (sp),hl                         ; HL -> the byte right after the call to Immediate (the string)
         ld      a,(hl)
         inc     hl
-        ex      (sp),hl                 ; put the advanced return address back, so RET (below) returns past the string
+        ex      (sp),hl                         ; put the advanced return address back, so RET (below) returns past the string
         or      a
-        ret     z                       ; 0 byte - end of the string, return to just after it
+        ret     z                               ; 0 byte - end of the string, return to just after it
         ld      c,a
         call    DisplayOut
-        jr      Immediate               ; loop for the next character
+        jr      Immediate                       ; loop for the next character
 
 ;
 ; The end message
