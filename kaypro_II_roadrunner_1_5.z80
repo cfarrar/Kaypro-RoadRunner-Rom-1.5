@@ -74,42 +74,51 @@ DisplayBufferSizeOneLess:       equ 0bffh      ; (display buffer size 0c00h) - 1
 ; menu (see ConfigDoneSave / StartGetSaved).
 ;
 
-BootSectorBuffer:               equ 0fa00h     ; raw copy of boot sector (track 0, sector 1)
-LoadAddress:                    equ 0fa02h     ; (word) RAM address to load the OS image to
-StartAddress:                   equ 0fa04h     ; (word) address to jump to after OS is loaded
-SectorCount:                    equ 0fa06h     ; (word, low byte used) number of 128-byte sectors to load
-SavedBufferEnable:              equ 0fa08h     ; saved copy of BufferEnable (type-ahead buffer on/off)
-SavedTTYDumpEnable:             equ 0fa0bh     ; saved copy of TTYDumpEnable (printer dump via serial vs parallel)
-SavedCursorCharAndBlinkEnable:  equ 0fa0ch     ; saved copy of CursorCharAndBlinkEnable
-SavedDumpCharacter:             equ 0fa0dh     ; saved copy of DumpCharacter (screen-dump-to-printer hotkey)
-SavedKeyClickEnable:            equ 0fa0eh     ; saved copy of KeyClickEnable
+BootSectorScratch               equ     0fa00h
+
+        org     BootSectorScratch
+
+BootSectorBuffer:               defs 2         ; raw copy of boot sector (track 0, sector 1)
+LoadAddress:                    defs 2         ; (word) RAM address to load the OS image to
+StartAddress:                   defs 2         ; (word) address to jump to after OS is loaded
+SectorCount:                    defs 2         ; (word, low byte used) number of 128-byte sectors to load
+SavedBufferEnable:              defs 1         ; saved copy of BufferEnable (type-ahead buffer on/off)
+                                defs 2         ; unused bytes at 0fa09h-0fa0ah
+SavedTTYDumpEnable:             defs 1         ; saved copy of TTYDumpEnable (printer dump via serial vs parallel)
+SavedCursorCharAndBlinkEnable:  defs 1         ; saved copy of CursorCharAndBlinkEnable
+SavedDumpCharacter:             defs 1         ; saved copy of DumpCharacter (screen-dump-to-printer hotkey)
+SavedKeyClickEnable:            defs 1         ; saved copy of KeyClickEnable
 
 ;
 ; Disk/track/sector state used by the CP/M-style disk BIOS calls
 ; (SelectDisk/SetTrack/SetSector/SetDma/ReadSector/WriteSector).
 ;
 
-DiskNumber:                     equ 0fc00h     ; (byte) currently selected logical drive (0=A:, 1=B:, ...)
-TrackNumber:                    equ 0fc01h     ; (word) requested track number
-SectorNumber:                   equ 0fc03h     ; (byte) requested CP/M (128-byte) sector number
-headHomed:                      equ 0fc09h     ; flag: set once the head has been homed/recalibrated this session
-sectorBufferDirty:              equ 0fc0ah     ; this is a "dirty" flag: nonzero means the 1K sector buffer at 0fc16h holds
+DiskBiosState                   equ     0fc00h
+
+        org     DiskBiosState
+
+DiskNumber:                     defs 1         ; (byte) currently selected logical drive (0=A:, 1=B:, ...)
+TrackNumber:                    defs 2         ; (word) requested track number
+SectorNumber:                   defs 1         ; (byte) requested CP/M (128-byte) sector number
+lastCachedDisk:                 defs 1         ; last disk number seen by the track cache (see WS07)
+lastCachedTrack:                defs 2         ; (word) last track number seen by the track cache
+lastCachedSector:               defs 1         ; last (sector>>2) value seen by the track cache
+workingSector:                  defs 1         ; SectorNumber >> 2 (1K-sector-block index within the track)
+headHomed:                      defs 1         ; flag: set once the head has been homed/recalibrated this session
+sectorBufferDirty:              defs 1         ; "dirty" flag: nonzero means the 1K sector buffer at 0fc16h holds
                                                ; a write that hasn't been flushed to disk yet (see ReadSector/WriteSector's
                                                ; shared tail at WS05, and HomeHead, which forces a real FDC Restore only
                                                ; when this is set)
-physicalSectorSkip:             equ 0fc0bh     ; pending physical-sector-skip count used by the sector cache logic
-lastSeenDiskNumber:             equ 0fc0ch     ; last disk number seen by the per-1K-sector cache (see WS02)
-lastAccessMissed:               equ 0fc11h     ; flag: nonzero => last access missed the sector cache, needs real I/O
-writeIfZero:                    equ 0fc12h     ; 0 = this is a write call, nonzero = this is a read call
-readWriteType:                  equ 0fc13h     ; write mode passed in C to WriteSector (0/1/2, see WriteSector)
-DmaAddress:                     equ 0fc14h     ; (word) current DMA (memory transfer) address for read/write
-lastCachedDisk:                 equ 0fc04h     ; last disk number seen by the track cache (see WS07)
-lastCachedTrack:                equ 0fc05h     ; (word) last track number seen by the track cache
-lastCachedSector:               equ 0fc07h     ; last (sector>>2) value seen by the track cache
-ftcResultStatus:                equ 0fc10h     ; FDC result/status byte returned from the low-level read/write
-workingTrack:                   equ 0fc0dh     ; (word) working track number for the current 1K-sector op
-workingDeblockSector:           equ 0fc0fh     ; working CP/M-sector-within-1K-block index (0-3)
-workingSector:                  equ 0fc08h     ; SectorNumber >> 2 (1K-sector-block index within the track)
+physicalSectorSkip:             defs 1         ; pending physical-sector-skip count used by the sector cache logic
+lastSeenDiskNumber:             defs 1         ; last disk number seen by the per-1K-sector cache (see WS02)
+workingTrack:                   defs 2         ; (word) working track number for the current 1K-sector op
+workingDeblockSector:           defs 1         ; working CP/M-sector-within-1K-block index (0-3)
+ftcResultStatus:                defs 1         ; FDC result/status byte returned from the low-level read/write
+lastAccessMissed:               defs 1         ; flag: nonzero => last access missed the sector cache, needs real I/O
+writeIfZero:                    defs 1         ; 0 = this is a write call, nonzero = this is a read call
+readWriteType:                  defs 1         ; write mode passed in C to WriteSector (0/1/2, see WriteSector)
+DmaAddress:                     defs 2         ; (word) current DMA (memory transfer) address for read/write
 
 ;
 ; Per-drive disk parameter block cache and floppy format state.
@@ -120,29 +129,32 @@ QuadDensityBit                  equ 0
 
 QuadDensityMask                 equ 1 shl QuadDensityBit
 
-selectedDrive:                  equ 0fe16h     ; logical drive number last selected (0xff = none yet)
-currentTrack:                   equ 0fe17h     ; current-track byte for whichever drive is now selected
-densityFormatFlags:             equ 0fe18h     ; current density/format flags for selected drive (bit0=quad density)
-IsDoubleSided:                  equ 0fe19h     ; flag: nonzero if the currently selected drive is double-sided
-driveAFormatParams:             equ 0fe1ah     ; saved per-drive format params, drive A: (3 bytes; 0xff = unprobed)
-driveBFormatParams:             equ 0fe1dh     ; saved per-drive format params, drive B: (3 bytes; 0xff = unprobed)
-driveCFormatParams:             equ 0fe20h     ; saved per-drive format params, drive C: (3 bytes; 0xff = unprobed)
-driveDFormatParams:             equ 0fe23h     ; saved per-drive format params, drive D: (3 bytes; 0xff = unprobed)
-DisplayUnknown:                 equ 0fe26h     ; target column operand for cursor-positioning escape (ESC = row col)
-DisplayCursorPosition:          equ 0fe27h     ; (word) pointer into DisplayBuffer for the current cursor position
-DisplayAlphabetSelect:          equ 0fe29h     ; AND-mask applied to high-bit chars: 07fh=ASCII, 01fh=Greek
-DiskParameterHeaders:           equ 0fe2ah     ; base of the 4-drive disk-parameter-header working area (0x53 bytes)
-diskParameterBlock:             equ 0fe6eh     ; disk parameter block staging area, active driver has its dpb copied here
+DriveParamCache                 equ     0fe16h
 
-checksumVectorA:                equ 0fe7eh      ; disk checksum tables
-checksumVectorB:                equ 0fe96h
-checksumVectorC:                equ 0feaeh
-checksumVectorD:                equ 0fec6h
+        org     DriveParamCache
 
-allocationVectorA:              equ 0fedeh      ; disk allocation tables
-allocationVectorB:              equ 0fef7h
-allocationVectorC:              equ 0ff10h
-allocationVectorD:              equ 0ff29h
+selectedDrive:                  defs 1         ; logical drive number last selected (0xff = none yet)
+currentTrack:                   defs 1         ; current-track byte for whichever drive is now selected
+densityFormatFlags:             defs 1         ; current density/format flags for selected drive (bit0=quad density)
+IsDoubleSided:                  defs 1         ; flag: nonzero if the currently selected drive is double-sided
+driveAFormatParams:             defs 3         ; saved per-drive format params, drive A: (3 bytes; 0xff = unprobed)
+driveBFormatParams:             defs 3         ; saved per-drive format params, drive B: (3 bytes; 0xff = unprobed)
+driveCFormatParams:             defs 3         ; saved per-drive format params, drive C: (3 bytes; 0xff = unprobed)
+driveDFormatParams:             defs 3         ; saved per-drive format params, drive D: (3 bytes; 0xff = unprobed)
+DisplayUnknown:                 defs 1         ; target column operand for cursor-positioning escape (ESC = row col)
+DisplayCursorPosition:          defs 2         ; (word) pointer into DisplayBuffer for the current cursor position
+DisplayAlphabetSelect:          defs 1         ; AND-mask applied to high-bit chars: 07fh=ASCII, 01fh=Greek
+DiskParameterHeaders:           defs 68        ; base of the 4-drive disk-parameter-header working area (4 x 17 bytes)
+diskParameterBlock:             defs 15        ; disk parameter block staging area, active driver has its dpb copied here
+                                defs 1         ; unused byte at 0fe7dh
+checksumVectorA:                defs 24        ; disk checksum tables
+checksumVectorB:                defs 24
+checksumVectorC:                defs 24
+checksumVectorD:                defs 24
+allocationVectorA:              defs 25        ; disk allocation tables
+allocationVectorB:              defs 25
+allocationVectorC:              defs 25
+allocationVectorD:              defs 25
 
 ;
 ; Live (in-use) configuration bytes and runtime work area.
@@ -151,17 +163,22 @@ allocationVectorD:              equ 0ff29h
 ; the setup menu without being written back to disk until SAVE? = Y.
 ;
 
-DumpCharacter:                  equ 0ff42h     ; keyboard char that triggers "dump screen to printer"
-CursorCharAndBlinkEnable:       equ 0ff43h     ; bit7 = blink enable, low bits = cursor character code
-DisplayEscapeState:             equ 0ff44h     ; terminal emulator escape-sequence state machine (0 = idle)
-TTYDumpEnable:                  equ 0ff45h     ; 0 = printer dump goes out parallel (ListOut), else serial (TTYOut)
-KeyClickEnable:                 equ 0ff46h     ; 0/1 mirror of the keyboard controller's key-click setting
-DisplayEchoEnable:              equ 0ff47h     ; nonzero = echo all DisplayOut characters to the printer
-BufferEnable:                   equ 0ff48h     ; 0 = direct keyboard I/O, 0xff = use the type-ahead Buffer
-UnbankMoveRebank:               equ 0ff49h     ; RAM copy of the relocated bank-switching block-move routine
-BufferContentCount:             equ 0ff60h     ; number of bytes currently queued in the type-ahead Buffer
-typeAheadBuffer:                equ 0ff61h     ; type-ahead keyboard buffer (up to 31 (01fh) bytes)
-directoryBuffer:                equ 0ff80h     ; disk directory buffer used by all drives - 128 bytes
+RuntimeConfig                   equ     0ff42h
+
+        org     RuntimeConfig
+
+DumpCharacter:                  defs 1         ; keyboard char that triggers "dump screen to printer"
+CursorCharAndBlinkEnable:       defs 1         ; bit7 = blink enable, low bits = cursor character code
+DisplayEscapeState:             defs 1         ; terminal emulator escape-sequence state machine (0 = idle)
+TTYDumpEnable:                  defs 1         ; 0 = printer dump goes out parallel (ListOut), else serial (TTYOut)
+KeyClickEnable:                 defs 1         ; 0/1 mirror of the keyboard controller's key-click setting
+DisplayEchoEnable:              defs 1         ; nonzero = echo all DisplayOut characters to the printer
+BufferEnable:                   defs 1         ; 0 = direct keyboard I/O, 0xff = use the type-ahead Buffer
+UnbankMoveRebank:               defs 13        ; RAM copy of the relocated bank-switching block-move routine
+                                defs 10        ; unused bytes at 0ff56h-0ff5fh
+BufferContentCount:             defs 1         ; number of bytes currently queued in the type-ahead Buffer
+typeAheadBuffer:                defs 31        ; type-ahead keyboard buffer (up to 31 (01fh) bytes)
+directoryBuffer:                defs 128       ; disk directory buffer used by all drives - 128 bytes
 
 CpmSectorSize                   equ 080h       ; CP/M logical sector size in bytes (128)
 
