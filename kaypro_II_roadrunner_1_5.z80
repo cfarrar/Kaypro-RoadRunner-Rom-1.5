@@ -58,8 +58,10 @@ DisplayBufferEnd:               equ 03bffh     ; last byte of the display buffer
 DisplayLineSize:                equ 080h       ; bytes allocated per display line (128)
 DisplayLineSizeVisablePortion   equ 050h       ; visible columns per line (80)
 DisplayLineSizeHiddenPortion    equ 030h       ; hidden/offscreen bytes per line (48)
-DisplayBufferSizeOneLess:       equ 0bffh      ; (display buffer size 0c00h) - 1; confirmed against a real
-                                               ; ROM dump (kaypro_II_roadrunner_1_5.rom, offset 0ca8h: bytes
+
+DisplayBufferSize:              equ DisplayBufferEnd-DisplayBuffer+1  ; 0c00h (3072 = 24 lines x 128 bytes/line)
+DisplayBufferSizeOneLess:       equ DisplayBufferSize-1        ; 0bffh - confirmed against a real ROM dump
+                                               ; (kaypro_II_roadrunner_1_5.rom, offset 0ca8h: bytes
                                                ; ff 0b = BC=0bffh) - this equate was missing from the original
                                                ; transcription (see DisplayClear) and has been added here with
                                                ; the value verified directly from the binary, not guessed
@@ -119,6 +121,10 @@ lastAccessMissed:               defs 1         ; flag: nonzero => last access mi
 writeIfZero:                    defs 1         ; 0 = this is a write call, nonzero = this is a read call
 readWriteType:                  defs 1         ; write mode passed in C to WriteSector (0/1/2, see WriteSector)
 DmaAddress:                     defs 2         ; (word) current DMA (memory transfer) address for read/write
+
+SectorBuffer1K                  equ     0fc16h  ; 1K CP/M-block disk-sector transfer buffer, in the
+                                                ; unreserved RAM gap immediately after DmaAddress
+                                                ; (fc16h-fe15h, before DriveParamCache below)
 
 ;
 ; Per-drive disk parameter block cache and floppy format state.
@@ -395,7 +401,7 @@ nmi:    ret     ; Just return, the actual io is done by halting
 
 StartPhase2:
         ld      sp,0ffffh               ; load the stack pointer. Always good to do
-        ld      b,00ah                  ; delay for a bit to allow hardware stabilization
+        ld      b,10                    ; delay for a bit to allow hardware stabilization
         call    DelayMS
         ld      a,000h                  ;
         ld      (BufferContentCount),a
@@ -465,15 +471,6 @@ StartPhase3:
 ;
 ; Thankyou message
 ;
-; Cursor-position escape sequence: ESC '=' row col, where row/col are
-; biased by adding ' ' (020h/32) per the ADM-3A-style convention used
-; throughout this ROM (compare the greeting message above). The
-; original transcription had ''+34 (empty string + 34) here instead of
-; ' '+34 (space + 34) used everywhere else in this file - confirmed as
-; a dropped-space transcription error by checking the real ROM binary
-; (kaypro_II_roadrunner_1_5.rom, offset 02cfh = byte 042h = 020h+34,
-; i.e. the space-biased value), and corrected below.
-;
 
         defb    sub, escape, '=', ' '+12, ' '+34
         defb    'Thank You !'
@@ -534,10 +531,10 @@ StartNextSector:                        ; Get next sector of OS
         dec     b
         ret     z
         inc     c
-        ld      a,028h
+        ld      a,40
         cp      c
         jr      nz,StartNextSector
-        ld      c,010h
+        ld      c,16
         push    bc
         ld      bc,1
         call    SetTrack
@@ -823,15 +820,15 @@ WriteSector:
         ld      (readWriteType),a
         cp      002h                            ; mode 2 = first sector of a new allocation block?
         jp      nz,WS02
-        ld      h,008h                          ; default: 8 x 128-byte CP/M sectors per 1K physical sector (SSDD)
+        ld      h,8                             ; default: 8 x 128-byte CP/M sectors per 1K physical sector (SSDD)
         ld      a,(IsDoubleSided)
         or      a
         jr      z,WS01
-        ld      h,010h                          ; double-sided: 16 CP/M sectors per 1K group (2K block)
+        ld      h,16                            ; double-sided: 16 CP/M sectors per 1K group (2K block)
         ld      a,(densityFormatFlags)
         and     QuadDensityMask
         jr      z,WS01
-        ld      h,020h                          ; double-sided quad density: 32 CP/M sectors per 1K group (4K block)
+        ld      h,32                            ; double-sided quad density: 32 CP/M sectors per 1K group (4K block)
 WS01:   ld      a,h
         ld      (physicalSectorSkip),a          ; remember the predicted streak length
         ld      a,(DiskNumber)
@@ -968,7 +965,7 @@ WS08:   ld      a,(SectorNumber)
         add     hl,hl
         add     hl,hl
         add     hl,hl                           ; HL = (SectorNumber & 3) * 128 - byte offset within the cache buffer
-        ld      de,0fc16h
+        ld      de,SectorBuffer1K
         add     hl,de                           ; HL -> the right 128 bytes within the cache buffer
         ld      de,(DmaAddress)
         ld      bc,CpmSectorSize
@@ -1031,15 +1028,21 @@ CompareTrackNumber:
 ;                      reserved here. 0xff in byte 0 means "this drive
 ;                      has never been selected/probed yet".
 ;   DiskParameterHeaders,
-;   0fe3bh, 0fe4ch,
-;   0fe5dh           - the 4 per-drive 17-byte DPH slots (A/B/C/D); see
+;   DiskParameterHeaderB, DiskParameterHeaderC,
+;   DiskParameterHeaderD    - the 4 per-drive 17-byte DPH slots (A/B/C/D); see
 ;                      DiskParameterHeadersRom for their layout. Each
 ;                      slot's DPB pointer field always points at the
-;                      single shared staging buffer at 0fe6eh.
-;   0fe6eh           - shared 15-byte DPB staging area; whichever
+;                      single shared staging buffer at DpbStagingBuffer.
+;   DpbStagingBuffer - shared 15-byte DPB staging area; whichever
 ;                      drive is currently selected has its real DPB
 ;                      (SSDD/DSDD/DSQD) copied in here.
 ;
+
+DphEntrySize            equ     17              ; bytes per per-drive DPH slot (DiskParameterHeaders is 4 x 17 = 68)
+DiskParameterHeaderB    equ     DiskParameterHeaders+DphEntrySize
+DiskParameterHeaderC    equ     DiskParameterHeaders+DphEntrySize+DphEntrySize
+DiskParameterHeaderD    equ     DiskParameterHeaders+DphEntrySize+DphEntrySize+DphEntrySize
+DpbStagingBuffer        equ     0fe6eh          ; shared 15-byte DPB staging area (see above)
 
 SelectDiskAndDetectFormat:
         ld      hl,0
@@ -1049,13 +1052,13 @@ SelectDiskAndDetectFormat:
         ld      hl,DiskParameterHeaders         ; HL = this drive's per-drive DPH slot (by drive number 0-3)
         cp      000h
         jr      z,SDF01
-        ld      hl,0fe3bh
+        ld      hl,DiskParameterHeaderB
         cp      001h
         jr      z,SDF01
-        ld      hl,0fe4ch
+        ld      hl,DiskParameterHeaderC
         cp      002h
         jr      z,SDF01
-        ld      hl,0fe5dh
+        ld      hl,DiskParameterHeaderD
 SDF01:  ld      a,(selectedDrive)
         ld      d,a                             ; D = previously selected drive number
         cp      c
@@ -1079,7 +1082,7 @@ SDF02:  ld      a,(de)
         cp      0ffh
         jr      z,SDF03                         ; previous drive was never probed - nothing to save
         push    bc
-        ld      bc,00003h                       ; 3 bytes
+        ld      bc,3                             ; 3 bytes
         ldir                                    ; save the outgoing drive's current-track/format snapshot
         pop     bc
         ld      de,currentTrack
@@ -1097,10 +1100,10 @@ SDF03:  ld      a,c
 SDF04:  ld      a,(hl)
         cp      0ffh
         jr      z,SDF06                         ; new drive has never been probed - go auto-detect its format below
-        ld      bc,00003h                       ; 3 bytes - restore the new drive's saved current-track/format snapshot
+        ld      bc,3                             ; 3 bytes - restore the new drive's saved current-track/format snapshot
         ldir
-        ld      bc,0000fh                       ; 15 bytes - copy the right DPB into the shared staging buffer (0fe6eh)
-        ld      de,0fe6eh
+        ld      bc,15                            ; 15 bytes - copy the right DPB into the shared staging buffer (DpbStagingBuffer)
+        ld      de,DpbStagingBuffer
         ld      hl,SSDDDiskParameterBlock
         ld      a,(IsDoubleSided)
         or      a
@@ -1130,12 +1133,12 @@ SDF06:  pop     hl
         ld      (hl),e
         inc     hl
         ld      (hl),d                          ; this drive's saved current-track snapshot = track 0 (just homed)
-        ld      de,00009h                       ; +9 bytes
+        ld      de,9                             ; +9 bytes
         add     hl,de
-        ld      de,0fe6eh
+        ld      de,DpbStagingBuffer
         ld      (hl),e
         inc     hl
-        ld      (hl),d                          ; this drive's DPB pointer field -> shared staging buffer (0fe6eh)
+        ld      (hl),d                          ; this drive's DPB pointer field -> shared staging buffer (DpbStagingBuffer)
         ld      a,000h
         ld      (densityFormatFlags),a          ; assume single density until proven otherwise
         in      a,(SysPioAData)
@@ -1146,7 +1149,7 @@ SDF06:  pop     hl
         ld      b,000h
         jr      nz,SDF08                        ; no address mark found on side 1 -> single-sided, stick with SSDD
 
-        ld      a,(0ff82h)                      ; sector-length byte returned by Read Address (see ReadNextAddress)
+        ld      a,(FdcAddrMarkSector)           ; sector-length byte returned by Read Address (see ReadNextAddress)
         cp      00ah
         ld      b,000h
         jr      c,SDF08                         ; small sector length -> single density -> DSDD
@@ -1159,8 +1162,8 @@ SDF06:  pop     hl
 SDF07:  ld      b,0ffh                          ; got a real address mark on side 1 -> double-sided
 SDF08:  ld      a,b
         ld      (IsDoubleSided),a
-        ld      bc,0000fh                       ; 15 bytes - copy the detected DPB into the shared staging buffer
-        ld      de,0fe6eh
+        ld      bc,15                            ; 15 bytes - copy the detected DPB into the shared staging buffer
+        ld      de,DpbStagingBuffer
         ldir
         in      a,(SysPioAData)
         and     sysPioSideSelectClrMask
@@ -1168,7 +1171,7 @@ SDF08:  ld      a,b
         ld      c,002h
         call    SeekToTrack                     ; seek to track 2 to probe density (track 0/1 can be special-cased on some formats)
         call    ReadNextAddress
-        ld      a,(0ff80h)                      ; track number byte returned by Read Address
+        ld      a,(FdcAddrMarkTrack)            ; track number byte returned by Read Address
         ld      e,000h
         cp      002h
         jr      z,SDF09                         ; controller sees track 2 as track 2 -> normal density numbering
@@ -1189,7 +1192,7 @@ SDF09:  ld      a,(densityFormatFlags)
         jr      z,SDF10
         ld      de,driveDFormatParams
 SDF10:  push    bc
-        ld      bc,00003h                       ; 3 bytes - save this drive's now-detected current-track/format snapshot
+        ld      bc,3                             ; 3 bytes - save this drive's now-detected current-track/format snapshot
         ldir
         pop     bc
         pop     de
@@ -1198,19 +1201,31 @@ SDF10:  push    bc
 
 ;
 ; ReadNextAddress - issue an FDC "Read Address" command (type III) and
-; capture the 6-byte address-mark record it returns into 0ff80h-0ff85h:
-;   0ff80h = track, 0ff81h = side, 0ff82h = sector, 0ff83h = sector
-;   length code, 0ff84h-0ff85h = CRC. Used during drive-format
+; capture the 6-byte address-mark record it returns into FdcAddrMarkTrack
+; (0ff80h) through 0ff85h:
+;   FdcAddrMarkTrack = track, FdcAddrMarkSide = side,
+;   FdcAddrMarkSector = sector, FdcAddrMarkSectorLen = sector
+;   length code, FdcAddrMarkCrc = CRC (2 bytes). Used during drive-format
 ;   auto-detection (see SDF06) to read a real address mark off the
 ;   media and infer sector size/track numbering without needing to
 ;   already know the disk's format. Returns Z if no address mark was
 ;   found (e.g. nothing in the drive, or wrong side selected).
 ;
+; This 6-byte capture area shares its storage with directoryBuffer
+; (0ff80h) - a transient reuse of the same RAM for a different purpose
+; while a Read Address command is in flight, not the disk directory.
+;
+
+FdcAddrMarkTrack        equ     0ff80h
+FdcAddrMarkSide         equ     0ff81h
+FdcAddrMarkSector       equ     0ff82h
+FdcAddrMarkSectorLen    equ     0ff83h
+FdcAddrMarkCrc          equ     0ff84h          ; 2 bytes (0ff84h-0ff85h)
 
 ReadNextAddress:
         push    hl
         push    bc
-        ld      hl,0ff80h
+        ld      hl,FdcAddrMarkTrack
         ld      bc,00600h + FdcData             ; 6 bytes
         ld      a,fdcReadAddress15ms            ; 0c4h - confirmed against the real ROM binary (offset 06b2h: 3e c4)
                                                 ; (original source had this as "FdcReadAddress15ms" - different
@@ -1388,7 +1403,7 @@ DiskOn:
         ret     z                               ; motor already on - nothing to do
         res     sysPioMotorOnBit,a
         out     (SysPioAData),a
-        ld      b,032h                          ; ~50ms spin-up delay
+        ld      b,50                            ; ~50ms spin-up delay
         call    DelayMS
         ret
 
@@ -1446,7 +1461,7 @@ WFFD01: in      a,(FdcStCmd)
 ;
 
 ReadCachedSectorRetry:
-        ld      l,003h                          ; L = recalibrate-and-retry cycles remaining
+        ld      l,3                             ; L = recalibrate-and-retry cycles remaining
 RCSR01: ld      de,DI01                         ; NOTE: DI01 used here purely for its numeric address value (040fh),
                                                 ; not as a jump target - D=4 recalibrate cycles allowed total
                                                 ; (counts down on failure), E=0fh (15) retry count
@@ -1462,7 +1477,7 @@ RCSR02: push    hl
         dec     d
         jr      z,RCSR03                        ; out of recalibrate cycles too - give up on this attempt
         call    RestoreDriveToTrack0            ; recalibrate (seek to track 0) and try again
-        ld      e,00fh                          ; 15 retries
+        ld      e,15                            ; 15 retries
         jr      RCSR02
 RCSR03:
         ld      (ftcResultStatus),a             ; save the FDC's final status byte
@@ -1494,7 +1509,7 @@ WCSR01: push    de
         dec     d
         ret     z                               ; out of recalibrate cycles too - give up (returns NZ -> caller sees failure)
         call    RestoreDriveToTrack0            ; recalibrate (seek to track 0) and try again
-        ld      e,00fh                          ; 15 retries
+        ld      e,15                            ; 15 retries
         jr      WCSR01
 
 ;
@@ -1524,8 +1539,8 @@ ReselectCachedDriveTrackSector:
 ;
 
 FdcWriteSectorTransfer:
-        ld      hl,0fc16h                       ; 1K sector buffer to transfer from/to
-        ld      b,004h                          ; 4 quarter-track (256-byte) chunks = 1024 bytes total
+        ld      hl,SectorBuffer1K               ; 1K sector buffer to transfer from/to
+        ld      b,4                             ; 4 quarter-track (256-byte) chunks = 1024 bytes total
         ld      de,09c88h                       ; E=88h: WD179x Read Sector command (m=0,S=0,E=1[15ms delay],C=0)
         jr      FRST01
 
@@ -1535,8 +1550,8 @@ FdcWriteSectorTransfer:
 ;
 
 FdcReadSectorTransfer:
-        ld      hl,0fc16h                       ; 1K sector buffer to transfer from/to
-        ld      b,004h                          ; 4 quarter-track (256-byte) chunks = 1024 bytes total
+        ld      hl,SectorBuffer1K               ; 1K sector buffer to transfer from/to
+        ld      b,4                             ; 4 quarter-track (256-byte) chunks = 1024 bytes total
         ld      de,0fcach                       ; E=ach: WD179x Write Sector command
 FRST01: call    SetDriveSelectOutput
         di
@@ -1742,14 +1757,18 @@ CheckKeyboardAndBuffer:
 ; buffer), then optionally saves the result to disk (ConfigDoneSave).
 ;
 ; Before drawing the menu prompts, this saves the 10 bytes of screen
-; memory at the current cursor position out to scratch RAM at 0bbf0h
-; (an address outside any of this ROM's other named RAM areas), and
-; pushes the original DisplayCursorPosition/HL/DE/BC onto the stack so
-; the whole sequence can be unwound and the original screen content
+; memory at the current cursor position out to ConfigScreenScratch (an
+; address outside any of this ROM's other named RAM areas), and pushes
+; the original DisplayCursorPosition/HL/DE/BC onto the stack so the
+; whole sequence can be unwound and the original screen content
 ; restored once the menu is done (see the matching pop/ldir/restore at
 ; ConfigSkipSave below) - the menu prompts overwrite whatever the user
 ; was looking at, and this puts it back afterwards.
 ;
+
+ConfigScreenScratch     equ     0bbf0h  ; scratch RAM (outside any of this ROM's other named RAM
+                                        ; areas) used to save/restore the screen content that the
+                                        ; setup-menu prompts are about to overwrite
 
 StartConfigSequence:
         ld      hl,(DisplayCursorPosition)
@@ -1758,10 +1777,10 @@ StartConfigSequence:
         call    DisplayOut
         call    DisplayPutChar
         ld      hl,(DisplayCursorPosition)
-        ld      de,0bbf0h                       ; scratch save area for the screen content under the menu prompts
-        ld      bc,00009h+1                     ; 10 bytes
+        ld      de,ConfigScreenScratch          ; scratch save area for the screen content under the menu prompts
+        ld      bc,10                           ; 10 bytes
         push    hl                              ; saved dest pointer (cursor position) for the final restore ldir
-        push    de                              ; saved source pointer (0bbf0h) for the final restore ldir
+        push    de                              ; saved source pointer (ConfigScreenScratch) for the final restore ldir
         push    bc                              ; saved byte count for the final restore ldir
         ldir                                    ; save the screen content under where the prompts are about to go
         call    Immediate                       ; print the cursor message
@@ -1957,6 +1976,19 @@ ConfigSetBufferOff:
 ; DmaAddress, written to track 0 sector 1) so they'll be reloaded by
 ; StartGetSaved on the next cold boot.
 ;
+; The equates below name the individual byte offsets within that staged
+; buffer - each one is where a live config value is written just before
+; the buffer is flushed to disk, becoming the corresponding Saved* value
+; (see BootSectorScratch above) on the next cold boot.
+;
+
+ConfigStageBase                  equ     0ff80h  ; base of the staged write buffer (= directoryBuffer,
+                                                  ; reused transiently for this purpose)
+StagedBufferEnable               equ     0ff88h  ; staging slot -> SavedBufferEnable (0fa08h)
+StagedTTYDumpEnable              equ     0ff8bh  ; staging slot -> SavedTTYDumpEnable (0fa0bh)
+StagedCursorCharAndBlinkEnable   equ     0ff8ch  ; staging slot -> SavedCursorCharAndBlinkEnable (0fa0ch)
+StagedDumpCharacter              equ     0ff8dh  ; staging slot -> SavedDumpCharacter (0fa0dh)
+StagedKeyClickEnable             equ     0ff8eh  ; staging slot -> SavedKeyClickEnable (0fa0eh)
 
 ConfigDoneSave:
         call    Immediate                       ; print save message
@@ -1982,20 +2014,20 @@ ConfigDoneSave:
         call    SetSector
         ld      hl,(DmaAddress)
         push    hl                      ; save the real DMA address - we're about to repurpose it
-        ld      hl,0ff80h
-        ld      (DmaAddress),hl         ; stage the write at 0ff80h, which holds the existing boot-sector
+        ld      hl,ConfigStageBase
+        ld      (DmaAddress),hl         ; stage the write at ConfigStageBase, which holds the existing boot-sector
         call    ReadSector              ; image (load/start/sector-count) - read it back in first so the
                                         ; save doesn't clobber that part of the sector
         ld      a,(CursorCharAndBlinkEnable)
-        ld      (0ff8ch),a              ; -> SavedCursorCharAndBlinkEnable (0fa0ch) on the next boot
+        ld      (StagedCursorCharAndBlinkEnable),a
         ld      a,(DumpCharacter)
-        ld      (0ff8dh),a              ; -> SavedDumpCharacter (0fa0dh)
+        ld      (StagedDumpCharacter),a
         ld      a,(TTYDumpEnable)
-        ld      (0ff8bh),a              ; -> SavedTTYDumpEnable (0fa0bh)
+        ld      (StagedTTYDumpEnable),a
         ld      a,(KeyClickEnable)
-        ld      (0ff8eh),a              ; -> SavedKeyClickEnable (0fa0eh)
+        ld      (StagedKeyClickEnable),a
         ld      a,(BufferEnable)
-        ld      (0ff88h),a              ; -> SavedBufferEnable (0fa08h)
+        ld      (StagedBufferEnable),a
         ld      c,001h                  ; write mode 1 (directory-style write - BDOS-style re-read expected)
         call    WriteSector
         pop     hl
@@ -2005,7 +2037,7 @@ ConfigDoneSave:
 ConfigSkipSave:
         pop     bc                      ; restore the saved byte count from StartConfigSequence
         pop     hl                      ; restore the saved dest pointer (original cursor position)
-        pop     de                      ; restore the saved source pointer (0bbf0h scratch area)
+        pop     de                      ; restore the saved source pointer (ConfigScreenScratch)
         ldir                            ; put the original screen content back where the prompts were
         pop     hl                      ; restore the original DisplayCursorPosition
         ld      (DisplayCursorPosition),hl
@@ -2102,10 +2134,10 @@ KeyboardCheckForSpecialKey:
         ld      hl,DisplayBuffer
 
 DisplayDumpToPrinter:
-        ld      e,018h                  ; 24 lines to dump
+        ld      e,24                    ; 24 lines to dump
 
 DisplayDumpToPrinterLineLoop:
-        ld      d,050h                  ; 80 columns per line
+        ld      d,DisplayLineSizeVisablePortion ; 80 columns per line
 
 DisplayDumpToPrinterCharLoop:
         ld      a,(hl)
@@ -2178,7 +2210,7 @@ KeyboardOut:
 
 TranslateNumpadKey:
         ld      hl,TNK01
-        ld      bc,00013h               ; search up to 19 bytes (one more than the table actually holds -
+        ld      bc,19                   ; search up to 19 bytes (one more than the table actually holds -
         cpir                            ; harmless, since a "miss" just runs one byte into TNK02's leading 0ffh)
         ret     nz                      ; not a recognised keypad code
         ld      de,TNK01
@@ -2406,7 +2438,7 @@ DO03:   ld      de,DisplayBufferEnd
 ;
 
 DisplayScrollUp:
-        ld      b,017h                          ; 23 lines to move
+        ld      b,23                            ; 23 lines to move
         ld      hl,DisplayBufferOneLineIn
         ld      de,DisplayBuffer
 Dsuplp: push    bc
@@ -2464,7 +2496,7 @@ DisplayCursorRight:
 
 DisplayCursorUp:
         push    hl
-        ld      de,0ff80h                       ; -DisplayLineSize, i.e. subtract one line's worth of bytes
+        ld      de,-DisplayLineSize             ; two's-complement negative offset: subtract one line's worth of bytes
         add     hl,de
         push    hl
         or      a
@@ -2547,7 +2579,7 @@ DCTEL01:push    hl
         ld      a,l
         and     080h                            ; keep only the high bit of the column (start-of-line marker)
         ld      l,a
-        ld      de,0004fh                       ; +79: end-of-line column offset
+        ld      de,79                            ; +79: end-of-line column offset
         add     hl,de                           ; HL -> last column of this line
         pop     de
         push    de
@@ -2755,7 +2787,7 @@ DisplayInsertLine:
         push    de
         jr      z,DIL01                         ; already on the last line - nothing to move, just clear it
         ld      de,DisplayBufferEnd
-        ld      hl,03b7fh                       ; last byte of the second-to-last line (source for the downward copy)
+        ld      hl,DisplayBufferEndOneLineBefore-1 ; last byte of the second-to-last line (source for the downward copy)
         lddr                                    ; move the cursor's line and everything below it down by one line (in reverse)
 DIL01: pop     hl
         push    hl
